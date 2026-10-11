@@ -1,0 +1,3 @@
+## Paperproof Upload and Answer Refinement Plan
+- [x] Restore concise, composed answers to uploaded-paper questions through OpenRouter, with verified passage citations and an honest fallback when the text does not support a claim; preserve the warm ivory, navy, teal, coral, Lora-and-Inter responsive workspace.
+- [x] Detect and display uploaded PDF and DOCX headings as reader sections, separate bibliography entries from paper text, and make those references available to the citation audit, including for nonstandard heading layouts.

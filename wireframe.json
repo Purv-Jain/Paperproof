@@ -1,0 +1,197 @@
+{
+  "version": 4,
+  "app_title": "Paperproof First Version Plan",
+  "nav": {
+    "placement": "none",
+    "items": []
+  },
+  "pages": [
+    {
+      "id": "page-9fe537ca",
+      "name": "Paper workspace",
+      "route": "/",
+      "item_ref": {
+        "index": 0,
+        "text": "Build a welcoming, responsive paper workspace with a concise usage guide, document upload, question input, and realistic sample-paper data kept behind one data-access layer; no sign-in or database."
+      },
+      "blocks": [
+        {
+          "id": "brand",
+          "type": "header",
+          "label": "Paperproof brand and purpose",
+          "hint": "A calm, student-friendly title and brief promise; no account navigation",
+          "x": 0,
+          "y": 0,
+          "w": 12,
+          "h": 1,
+          "item_ref": {
+            "index": 0,
+            "text": "Build a welcoming, responsive paper workspace with a concise usage guide, document upload, question input, and realistic sample-paper data kept behind one data-access layer; no sign-in or database."
+          },
+          "type_source": "palette"
+        },
+        {
+          "id": "guide",
+          "type": "text",
+          "label": "How it works guide",
+          "hint": "Three short steps: choose a paper, ask a question, review evidence and citations",
+          "x": 0,
+          "y": 1,
+          "w": 12,
+          "h": 2,
+          "item_ref": {
+            "index": 0,
+            "text": "Build a welcoming, responsive paper workspace with a concise usage guide, document upload, question input, and realistic sample-paper data kept behind one data-access layer; no sign-in or database."
+          },
+          "type_source": "palette"
+        },
+        {
+          "id": "paper-picker",
+          "type": "text",
+          "label": "Paper picker and upload",
+          "hint": "Sample papers and PDF/document upload, selected-paper details and processing feedback",
+          "x": 0,
+          "y": 3,
+          "w": 5,
+          "h": 4,
+          "item_ref": {
+            "index": 0,
+            "text": "Build a welcoming, responsive paper workspace with a concise usage guide, document upload, question input, and realistic sample-paper data kept behind one data-access layer; no sign-in or database."
+          },
+          "type_source": "palette"
+        },
+        {
+          "id": "question-form",
+          "type": "form",
+          "label": "Ask about this paper",
+          "hint": "Question input, example questions, and submit action",
+          "x": 5,
+          "y": 3,
+          "w": 7,
+          "h": 4,
+          "item_ref": {
+            "index": 0,
+            "text": "Build a welcoming, responsive paper workspace with a concise usage guide, document upload, question input, and realistic sample-paper data kept behind one data-access layer; no sign-in or database."
+          },
+          "type_source": "palette"
+        }
+      ],
+      "deleted_ids": []
+    },
+    {
+      "id": "page-24820a22",
+      "name": "Grounded answers",
+      "route": "/",
+      "item_ref": {
+        "index": 1,
+        "text": "Provide grounded answers to questions about the selected paper, with quoted evidence and page or section references when available, plus clear uncertainty when the document does not support an answer."
+      },
+      "blocks": [
+        {
+          "id": "paper-context",
+          "type": "text",
+          "label": "Paper context",
+          "hint": "Current paper title, source, and extraction status",
+          "x": 0,
+          "y": 0,
+          "w": 5,
+          "h": 2,
+          "item_ref": {
+            "index": 1,
+            "text": "Provide grounded answers to questions about the selected paper, with quoted evidence and page or section references when available, plus clear uncertainty when the document does not support an answer."
+          },
+          "type_source": "palette"
+        },
+        {
+          "id": "answer",
+          "type": "section",
+          "label": "Evidence-backed answer",
+          "hint": "Answer, uncertainty notice, and quoted passages with page or section markers",
+          "x": 5,
+          "y": 0,
+          "w": 7,
+          "h": 4,
+          "item_ref": {
+            "index": 1,
+            "text": "Provide grounded answers to questions about the selected paper, with quoted evidence and page or section references when available, plus clear uncertainty when the document does not support an answer."
+          },
+          "type_source": "palette"
+        },
+        {
+          "id": "follow-up",
+          "type": "form",
+          "label": "Follow-up question",
+          "hint": "Ask again without re-uploading the paper",
+          "x": 0,
+          "y": 4,
+          "w": 7,
+          "h": 2,
+          "item_ref": {
+            "index": 1,
+            "text": "Provide grounded answers to questions about the selected paper, with quoted evidence and page or section references when available, plus clear uncertainty when the document does not support an answer."
+          },
+          "type_source": "palette"
+        }
+      ],
+      "deleted_ids": []
+    },
+    {
+      "id": "page-2a696fd7",
+      "name": "Citation audit",
+      "route": "/",
+      "item_ref": {
+        "index": 2,
+        "text": "Audit references for existence and placement against paper claims, surface citation and formatting errors in an actionable report, and generate a copyable correction prompt for external models."
+      },
+      "blocks": [
+        {
+          "id": "audit-overview",
+          "type": "text",
+          "label": "Verification overview",
+          "hint": "Counts and statuses for verified, unverified, misplaced, and formatting issues",
+          "x": 0,
+          "y": 0,
+          "w": 12,
+          "h": 2,
+          "item_ref": {
+            "index": 2,
+            "text": "Audit references for existence and placement against paper claims, surface citation and formatting errors in an actionable report, and generate a copyable correction prompt for external models."
+          },
+          "type_source": "palette"
+        },
+        {
+          "id": "findings",
+          "type": "list",
+          "label": "Citation and format findings",
+          "hint": "Per-reference evidence, claim match, severity and next action",
+          "x": 0,
+          "y": 2,
+          "w": 7,
+          "h": 5,
+          "item_ref": {
+            "index": 2,
+            "text": "Audit references for existence and placement against paper claims, surface citation and formatting errors in an actionable report, and generate a copyable correction prompt for external models."
+          },
+          "type_source": "palette"
+        },
+        {
+          "id": "fix-prompt",
+          "type": "text",
+          "label": "Correction prompt",
+          "hint": "Generated instructions grounded in findings, with a copy button",
+          "x": 7,
+          "y": 2,
+          "w": 5,
+          "h": 5,
+          "item_ref": {
+            "index": 2,
+            "text": "Audit references for existence and placement against paper claims, surface citation and formatting errors in an actionable report, and generate a copyable correction prompt for external models."
+          },
+          "type_source": "palette"
+        }
+      ],
+      "deleted_ids": []
+    }
+  ],
+  "attached_to_plan": false
+}

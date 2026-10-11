@@ -1,0 +1,9 @@
+
+reflex[db]==0.9.12
+pypdf
+python-docx
+faker
+pymupdf
+pytesseract
+pillow
+requests
