@@ -39,7 +39,7 @@ services:
 # Nothing else is needed. Caddy serves the frontend and proxies the backend from
 # a single origin, so the browser never applies its same-origin policy and no
 # api_url or CORS configuration is required.
-
-# Pull request previews are available but opt-in.
-previews:
-  generation: manual
+#
+# The root-level `previews` block is deliberately omitted: preview environments
+# are a Pro feature and Render rejects the Blueprint on Hobby. Omitting it
+# leaves previews disabled, which is the default.
