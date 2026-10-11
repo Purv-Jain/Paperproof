@@ -189,17 +189,20 @@ That alone gives you the full app at `https://paperproof.onrender.com`. Stop her
 
 ### Add the Vercel frontend (optional)
 
-1. Deploy to Render first and note the URL, e.g. `https://paperproof.onrender.com`.
-2. In the Render dashboard, add `REFLEX_CORS_ALLOWED_ORIGINS` to the service and redeploy, with the value set to your future Vercel origin (e.g. `https://paperproof.vercel.app`). Reflex reads this natively; `rxconfig.py` needs no change.
-3. In Vercel: **Add New → Project**, select the same repo.
-4. Add these as Vercel **environment variables** (available to the build):
-   - `REFLEX_API_URL` = `https://paperproof.onrender.com`
+1. Deploy to Render first and note the URL, e.g. `https://paperproof.onrender.com`. Step 4 needs it.
+2. In Vercel: **Add New → Project**, select the same repo, and set **Framework Preset** to **Other**. `vercel.json` sets `"framework": null`, which pins this regardless of the dropdown. Leave the build/output/install command fields alone — Vercel enables the Override toggle under "Other" and `vercel.json` supplies the values.
+3. Add these as Vercel **environment variables** for **all** environments, then deploy:
+   - `REFLEX_API_URL` = the Render URL from step 1
    - `REFLEX_USE_NPM` = `1`
-5. Deploy. `vercel.json` runs `reflex export --frontend-only --no-zip` and publishes `.web/build/client`.
 
-`REFLEX_API_URL` has to be set at **build** time, not runtime: Reflex compiles the backend address into the JavaScript bundle. Without it the bundle points at `localhost`, and the frontend then tries to talk to the visitor's own machine.
+   `vercel.json` runs `reflex export --frontend-only --no-zip` and publishes `.web/build/client`. Note the Vercel domain now, e.g. `https://paperproof.vercel.app`.
+4. Back on Render, add `REFLEX_CORS_ALLOWED_ORIGINS` = the Vercel domain from step 3 (exact origin, no trailing slash or path), then trigger a redeploy.
 
-If you later change the Vercel project name, update both `REFLEX_API_URL` (unchanged) and `REFLEX_CORS_ALLOWED_ORIGINS` on Render, then redeploy Render.
+`REFLEX_API_URL` has to be set at **build** time, not runtime: Reflex compiles the backend address into the JavaScript bundle. Without it the bundle points at `localhost`, and the frontend then tries to talk to the visitor's own machine. Changing it later requires a fresh Vercel build.
+
+Step 4 comes last because the Vercel domain does not exist until step 2. It is hardening rather than a hard requirement — Reflex defaults `cors_allowed_origins` to `*`, so the app connects without it; setting it pins the backend to your frontend origin instead of any origin.
+
+If you change the Vercel project name later, update `REFLEX_CORS_ALLOWED_ORIGINS` on Render (`REFLEX_API_URL` points at Render, so it is unaffected) and redeploy Render.
 
 ### Local Docker run
 
