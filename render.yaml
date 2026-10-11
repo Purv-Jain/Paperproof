@@ -24,7 +24,10 @@ services:
     # Caddy proxies /_health to the backend, so this fails closed when the
     # backend is down.
     healthCheckPath: /_health
-    maxShutdownDelaySeconds: 60
+
+    # maxShutdownDelaySeconds is deliberately omitted: Render rejects it on free
+    # tier services. Graceful shutdown uses the 30 s default, which is fine here
+    # because sessions are ephemeral and are dropped on deploy anyway.
 
     envVars:
       # Prompted for in the Render dashboard on first deploy. Without it the app
