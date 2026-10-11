@@ -60,14 +60,33 @@ FROM python:3.13-slim AS runtime
 # tesseract-ocr-eng is listed explicitly: pytesseract calls the tesseract binary
 # with lang="eng", and --no-install-recommends would otherwise skip the English
 # language pack, silently breaking OCR of scanned PDFs.
+# libcap2-bin provides setcap, used below to strip Caddy's file capability.
 RUN apt-get update -y \
  && apt-get install -y --no-install-recommends \
       ca-certificates \
+      libcap2-bin \
       tesseract-ocr \
       tesseract-ocr-eng \
  && rm -rf /var/lib/apt/lists/*
 
-COPY --from=caddy:2-alpine /usr/bin/caddy /usr/bin/caddy
+# The official Caddy image ships the binary with
+# `setcap cap_net_bind_service=+ep /usr/bin/caddy`. The +e (effective) bit makes
+# the kernel refuse to exec the binary unless the process can actually obtain
+# that capability, and Render does not put CAP_NET_BIND_SERVICE in the
+# container's bounding set. The result is `caddy: Operation not permitted` and
+# exit 126 before Caddy ever starts.
+#
+# The capability is unnecessary here: Caddy binds :{$PORT}, and Render sets PORT
+# to 10000, far above the privileged range. Strip it.
+#
+# The `test -z` is the real guard. BuildKit's own build containers do have
+# CAP_NET_BIND_SERVICE in their bounding set, so merely running `caddy version`
+# would succeed even with the capability still attached; asserting that getcap
+# comes back empty is what actually catches a regression at build time.
+COPY --from=caddy:2 /usr/bin/caddy /usr/bin/caddy
+RUN setcap -r /usr/bin/caddy \
+ && test -z "$(getcap /usr/bin/caddy)" \
+ && /usr/bin/caddy version
 
 ARG PORT
 ENV PATH="/app/.venv/bin:$PATH" \

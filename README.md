@@ -200,6 +200,7 @@ Then open <http://localhost:8080>.
 - **`plan: free` is 0.1 CPU / 512 MB**, and free instances spin down after ~15 minutes idle; the first request after a wake-up takes 30–60 s. Fine for reading, asking questions, and auditing. OCR of a scanned PDF is CPU-bound; the code already caps it at 20 pages / 90 s per file. If uploads feel slow, change `plan` to `starter` in `render.yaml` — nothing else needs to change.
 - **A single backend worker runs.** No Redis is configured, so Reflex stays single-process. Do not scale `numInstances` above 1 without adding Redis first: with the disk state manager, separate instances would not see each other's sessions.
 - **Health checks.** `/_health` is proxied to the backend, so a backend crash fails the check and Render restarts the service.
+- **Caddy's file capability is stripped in the Dockerfile.** The official Caddy image sets `cap_net_bind_service=+ep` on its binary; the effective bit makes the kernel refuse to exec it under Render, which does not grant that capability. `RUN setcap -r` removes it. The build asserts the capability is gone, so this cannot regress silently.
 
 ---
 
