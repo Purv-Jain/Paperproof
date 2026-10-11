@@ -16,7 +16,6 @@ assets/xy/
 .node/
 !.env.example
 
-# Deployment
-.vercel
+# Deployment artifacts from 'reflex export'
 frontend.zip
 backend.zip

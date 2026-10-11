@@ -5,7 +5,6 @@
 .git
 .gitignore
 .github
-.vercel
 
 # Local toolchains and build output (rebuilt inside the image).
 .venv

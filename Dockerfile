@@ -50,9 +50,8 @@ COPY . ./
 
 # api_url is intentionally left at its localhost default. The compiled frontend
 # rewrites a localhost backend URL to the origin it was served from and upgrades
-# it to wss://, which is exactly right for the single-origin Render deployment.
-# When exporting for a *separate* static host instead, set
-# REFLEX_API_URL=https://your-backend.example.com in the build environment.
+# it to wss://, which is what makes this single-origin deployment work with no
+# REFLEX_API_URL and no CORS configuration.
 RUN reflex export --frontend-only --no-zip
 
 

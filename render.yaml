@@ -33,13 +33,9 @@ services:
       - key: OPENROUTER_API_KEY
         sync: false
 
-      # ONLY needed when the frontend is served from somewhere other than this
-      # service — see vercel.json for the split setup. Leave it unset for the
-      # single-origin Render deployment, which needs no CORS configuration
-      # because Caddy serves the frontend and the backend from one origin.
-      #
-      # - key: REFLEX_CORS_ALLOWED_ORIGINS
-      #   value: https://paperproof.vercel.app
+# Nothing else is needed. Caddy serves the frontend and proxies the backend from
+# a single origin, so the browser never applies its same-origin policy and no
+# api_url or CORS configuration is required.
 
 # Pull request previews are available but opt-in.
 previews:
