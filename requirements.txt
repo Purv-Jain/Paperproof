@@ -1,4 +1,3 @@
-
 reflex[db]==0.9.12
 pypdf
 python-docx
@@ -7,3 +6,4 @@ pymupdf
 pytesseract
 pillow
 requests
+python-dotenv
