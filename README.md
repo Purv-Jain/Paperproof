@@ -144,6 +144,81 @@ Then open the app at `http://localhost:3000`. (The first run downloads the JS to
 
 ---
 
+## Deployment
+
+The production topology is: **Render runs the whole app** (frontend + backend + OCR) and **Vercel optionally serves a CDN copy of the static frontend** in front of it.
+
+```
+                     ┌──────────────────────────┐
+  browser  ────────► │  Vercel (optional)       │   static React Router bundle
+                     │  *.vercel.app            │   ──(Socket.IO ws + HTTP)──┐
+                     └──────────────────────────┘                             │
+                     ┌──────────────────────────┐                             │
+  browser  ────────► │  Render  Caddy  :$PORT   │ ◄───────────────────────────┘
+                     │  reflex backend :8000    │   Python, OCR, OpenRouter, Crossref
+                     └──────────────────────────┘
+```
+
+Why the split: Reflex 0.9 processes every UI event on the backend over a **persistent Socket.IO WebSocket**. A CDN-served static frontend is just a set of files and needs no long-lived connection of its own, so it sits in front without fighting the backend's WebSocket.
+
+### Files
+
+| File | Purpose |
+| --- | --- |
+| `render.yaml` | Render Blueprint: one Docker web service, `OPENROUTER_API_KEY` prompted, health check on `/_health`. |
+| `Dockerfile` | Two stages. Builder = Python 3.13 + Node 22 + uv, runs `reflex export`. Runtime = Python 3.13 + `tesseract-ocr-eng` + Caddy, **no Node**. |
+| `Caddyfile` | Serves the exported bundle from `/srv`, proxies `/_event`, `/ping`, `/_upload`, `/_all_routes`, `/_health` to the backend. |
+| `.dockerignore` | Keeps the build context small and stops host-generated state leaking into the image. |
+| `vercel.json` | Builds the static frontend on Vercel and publishes `.web/build/client`. |
+| `.vercelignore` | Excludes local toolchains from CLI deploys. |
+
+### Why Docker on Render
+
+Render's native Python runtime has no `root`, so `apt-get install tesseract-ocr` from `apt-packages.txt` is impossible there — scanned PDFs would silently fail to OCR. The Docker runtime installs it explicitly. Docker also pins Python 3.13 and Node 22 exactly.
+
+`apt-packages.txt` still applies to local Debian/Ubuntu development and is not used by the container (the Dockerfile installs the package directly).
+
+### Deploy to Render
+
+1. Push these files to GitHub.
+2. In Render: **New → Blueprint**, select the repo. Render reads `render.yaml`.
+3. When prompted, paste an `OPENROUTER_API_KEY` (<https://openrouter.ai/keys>). Skipping it is fine — the citation audit still works and Q&A returns a "not configured" message.
+4. Deploy. First build compiles the frontend (~2–5 min).
+
+That alone gives you the full app at `https://paperproof.onrender.com`. Stop here if you don't need a CDN.
+
+### Add the Vercel frontend (optional)
+
+1. Deploy to Render first and note the URL, e.g. `https://paperproof.onrender.com`.
+2. In the Render dashboard, add `REFLEX_CORS_ALLOWED_ORIGINS` to the service and redeploy, with the value set to your future Vercel origin (e.g. `https://paperproof.vercel.app`). Reflex reads this natively; `rxconfig.py` needs no change.
+3. In Vercel: **Add New → Project**, select the same repo.
+4. Add these as Vercel **environment variables** (available to the build):
+   - `REFLEX_API_URL` = `https://paperproof.onrender.com`
+   - `REFLEX_USE_NPM` = `1`
+5. Deploy. `vercel.json` runs `reflex export --frontend-only --no-zip` and publishes `.web/build/client`.
+
+`REFLEX_API_URL` has to be set at **build** time, not runtime: Reflex compiles the backend address into the JavaScript bundle. Without it the bundle points at `localhost`, and the frontend then tries to talk to the visitor's own machine.
+
+If you later change the Vercel project name, update both `REFLEX_API_URL` (unchanged) and `REFLEX_CORS_ALLOWED_ORIGINS` on Render, then redeploy Render.
+
+### Local Docker run
+
+```bash
+docker build -t paperproof .
+docker run --rm -p 8080:8080 -e PORT=8080 -e OPENROUTER_API_KEY=sk-or-v1-... paperproof
+```
+
+Then open <http://localhost:8080>.
+
+### Production notes
+
+- **Sessions are ephemeral by design.** Reflex's disk state manager writes to `.states/` inside the container, which is wiped on every deploy and on every free-tier spin-down. `uploaded_files/` behaves the same way. This matches the app's session-only promise — no database, no sign-in — but a redeploy does drop in-flight sessions. To survive redeploys, attach a Render persistent disk and set the Reflex state path onto it.
+- **`plan: free` is 0.1 CPU / 512 MB.** Fine for reading, asking questions, and auditing. OCR of a scanned PDF is CPU-bound; the code already caps it at 20 pages / 90 s per file. If uploads feel slow, change `plan` to `starter` in `render.yaml` — nothing else needs to change.
+- **A single backend worker runs.** No Redis is configured, so Reflex stays single-process. Do not scale `numInstances` above 1 without adding Redis first: with the disk state manager, separate instances would not see each other's sessions.
+- **Health checks.** `/_health` is proxied to the backend, so a backend crash fails the check and Render restarts the service.
+
+---
+
 ## Tests
 
 Tests live in `scripts/` and are plain `unittest` suites. Run them from the repository root so the `app` package is importable:
@@ -185,7 +260,13 @@ PaperProof/
 │   ├── test_paper_data.py      # Extraction and sample-data tests
 │   └── test_citation_audit.py  # Audit logic tests
 ├── assets/                     # favicon and placeholder image
-├── apt-packages.txt            # System dependency (tesseract-ocr)
+├── apt-packages.txt            # System dependency (tesseract-ocr), for local dev
+├── Caddyfile                   # Static frontend + backend reverse proxy (production)
+├── Dockerfile                  # Two-stage production image (build + runtime)
+├── render.yaml                 # Render Blueprint
+├── vercel.json                 # Vercel static-frontend config
+├── .dockerignore               # Docker build context exclusions
+├── .vercelignore               # Vercel CLI deploy exclusions
 ├── .env.example                # Template for local configuration (copy to .env)
 ├── .python-version             # Pin for uv: Python 3.13
 ├── run.ps1                     # Windows launcher (venv + portable Node + reflex run)
@@ -195,7 +276,7 @@ PaperProof/
 └── plan.md                     # Build plan / completed milestones
 ```
 
-> Git-ignored and generated locally: `.env` (secrets), `.venv/` (Python env), `.node/` (portable Node), `.web/` (frontend build). `reflex.lock/` keeps the npm lockfile (`package-lock.json`); this project is npm-managed (`REFLEX_USE_NPM=1`), not Bun.
+> Git-ignored and generated locally: `.env` (secrets), `.venv/` (Python env), `.node/` (portable Node), `.web/` (frontend build), `uploaded_files/` (session uploads), `.states/` (session state). `reflex.lock/` keeps the npm lockfile (`package-lock.json`); this project is npm-managed (`REFLEX_USE_NPM=1`), not Bun.
 
 ### How a question is answered
 1. `workspace_state.save_question` validates the question.

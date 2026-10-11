@@ -1,0 +1,40 @@
+# Keep the build context small and prevent host-generated state from leaking
+# into the image. Everything the image needs is committed: app/, assets/,
+# rxconfig.py, reflex.lock/, requirements.txt.
+
+.git
+.gitignore
+.github
+.vercel
+
+# Local toolchains and build output (rebuilt inside the image).
+.venv
+.node
+.web
+.states
+node_modules
+__pycache__
+*.py[cod]
+*.egg-info
+.pytest_cache
+
+# Runtime scratch (written by the container as the `reflex` user).
+uploaded_files
+*.db
+frontend.zip
+backend.zip
+
+# Secrets — never bake these into the image. Set them as Render env vars.
+.env
+
+# Development-only files.
+# Caddyfile is deliberately NOT excluded: the container CMD reads
+# /app/Caddyfile at start-up.
+scripts
+plan.md
+wireframe.json
+run.ps1
+apt-packages.txt
+Dockerfile
+.dockerignore
+README.md

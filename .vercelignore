@@ -1,0 +1,16 @@
+# Applied when deploying with the Vercel CLI from a working tree. Deploys from
+# Git already respect .gitignore.
+#
+# .web is deliberately NOT excluded: `reflex export` writes the deployable
+# frontend into .web/build/client, which is the outputDirectory in vercel.json.
+
+.venv
+.node
+.states
+uploaded_files
+node_modules
+__pycache__
+*.py[cod]
+*.db
+.env
+.git

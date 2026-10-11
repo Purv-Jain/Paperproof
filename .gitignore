@@ -15,3 +15,8 @@ assets/xy/
 .env
 .node/
 !.env.example
+
+# Deployment
+.vercel
+frontend.zip
+backend.zip
