@@ -444,8 +444,39 @@ def _ground_answer(
     ]
 
 
+def _bounded_float(
+    raw: Any, low: float, high: float, current: float
+) -> float:
+    """Coerce a raw form value to a float clamped within [low, high]."""
+    try:
+        value = float(str(raw).strip())
+    except (TypeError, ValueError):
+        return current
+    if not math.isfinite(value):
+        return current
+    return min(high, max(low, value))
+
+
+def _bounded_int(raw: Any, low: int, high: int, current: int) -> int:
+    """Coerce a raw form value to an int clamped within [low, high]."""
+    try:
+        value = float(str(raw).strip())
+    except (TypeError, ValueError):
+        return current
+    if not math.isfinite(value):
+        return current
+    return min(high, max(low, int(round(value))))
+
+
 def _call_openrouter(
-    question: str, passages: list[RetrievedPassage]
+    question: str,
+    passages: list[RetrievedPassage],
+    *,
+    temperature: float = 0.3,
+    top_p: float = 1.0,
+    top_k: int = 0,
+    frequency_penalty: float = 0.0,
+    presence_penalty: float = 0.0,
 ) -> tuple[str, list[str]]:
     api_key = os.getenv("OPENROUTER_API_KEY", "").strip()
     if not api_key:
@@ -486,7 +517,13 @@ def _call_openrouter(
             },
         ],
         "max_tokens": 420,
+        "temperature": temperature,
+        "top_p": top_p,
+        "frequency_penalty": frequency_penalty,
+        "presence_penalty": presence_penalty,
     }
+    if top_k and top_k > 0:
+        payload["top_k"] = top_k
     for attempt in range(2):
         try:
             response = requests.post(
@@ -614,6 +651,11 @@ class WorkspaceState(rx.State):
     answer_error_message: str = ""
     answer_loading: bool = False
     answer_request_id: int = 0
+    temperature: float = 0.3
+    top_p: float = 1.0
+    top_k: int = 0
+    frequency_penalty: float = 0.0
+    presence_penalty: float = 0.0
     uploading: bool = False
     upload_error: str = ""
     upload_success: str = ""
@@ -736,6 +778,30 @@ class WorkspaceState(rx.State):
         self.question_error = False
         self._clear_answer()
 
+    @rx.event
+    def update_temperature(self, value: float):
+        self.temperature = _bounded_float(value, 0.0, 2.0, self.temperature)
+
+    @rx.event
+    def update_top_p(self, value: float):
+        self.top_p = _bounded_float(value, 0.0, 1.0, self.top_p)
+
+    @rx.event
+    def update_top_k(self, value: float):
+        self.top_k = _bounded_int(value, 0, 100, self.top_k)
+
+    @rx.event
+    def update_frequency_penalty(self, value: float):
+        self.frequency_penalty = _bounded_float(
+            value, -2.0, 2.0, self.frequency_penalty
+        )
+
+    @rx.event
+    def update_presence_penalty(self, value: float):
+        self.presence_penalty = _bounded_float(
+            value, -2.0, 2.0, self.presence_penalty
+        )
+
     @rx.event(background=True)
     async def save_question(self, form_data: dict[str, Any]):
         text = str(form_data.get("question", "")).strip()
@@ -764,6 +830,11 @@ class WorkspaceState(rx.State):
             paper_id = self.selected_id
             passages = self.selected_paper["passages"]
             request_id = self.answer_request_id
+            temperature = self.temperature
+            top_p = self.top_p
+            top_k = self.top_k
+            frequency_penalty = self.frequency_penalty
+            presence_penalty = self.presence_penalty
         yield
 
         answer_text = ""
@@ -779,7 +850,14 @@ class WorkspaceState(rx.State):
                 answer_text = unsupported_answer
             else:
                 generated_answer, cited_ids = await asyncio.to_thread(
-                    _call_openrouter, text, retrieved
+                    _call_openrouter,
+                    text,
+                    retrieved,
+                    temperature=temperature,
+                    top_p=top_p,
+                    top_k=top_k,
+                    frequency_penalty=frequency_penalty,
+                    presence_penalty=presence_penalty,
                 )
                 answer_text, evidence = _ground_answer(
                     text, retrieved, generated_answer, cited_ids

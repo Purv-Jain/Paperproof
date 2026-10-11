@@ -140,6 +140,8 @@ Then open the app at `http://localhost:3000`. (The first run downloads the JS to
 
 > **Troubleshooting:** If `reflex run` fails with `TypeError: ForwardRef.__init__() got an unexpected keyword argument 'is_class'` or `ImportError: cannot import name 'UTC' from 'datetime'`, your venv is on Python 3.10. Recreate it on 3.13 with `uv venv --clear --python 3.13 .venv` and reinstall requirements.
 
+> **Troubleshooting:** If the browser shows **"Cannot connect to server: websocket error"**, another Reflex instance is almost certainly already running and sharing this project's `.web/` build folder. Two instances fight over ports (frontend on `3000`/`3001`, backend on `8000`/`8001`) and the most recently started one overwrites `.web/env.json` with its own port numbers — so the frontend ends up pointing at a backend port nobody is listening on. **Run only one instance at a time.** Close the second terminal, stop the extra processes, and relaunch `.\run.ps1` once; then hard-refresh the browser (`Ctrl+Shift+R`).
+
 ---
 
 ## Tests

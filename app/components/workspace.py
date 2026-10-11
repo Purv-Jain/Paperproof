@@ -822,6 +822,109 @@ def evidence_card(evidence: AnswerEvidence) -> rx.Component:
     )
 
 
+def setting_control(
+    label: str,
+    hint: str,
+    value: rx.Var,
+    setter: rx.EventHandler,
+    min_value: float,
+    max_value: float,
+    step: float,
+) -> rx.Component:
+    """A compact labelled numeric control for one answer-sampling parameter."""
+    return rx.el.label(
+        rx.el.span(
+            label,
+            class_name="text-[10px] font-semibold tracking-wide text-[#5f7268]",
+        ),
+        rx.el.input(
+            type="number",
+            value=value,
+            on_change=setter,
+            min=min_value,
+            max=max_value,
+            step=step,
+            aria_label=f"{label} setting",
+            class_name="mt-1 w-full rounded-lg border border-[#d9e0d3] bg-[#fffefa] px-2.5 py-1.5 text-xs tabular-nums text-[#273b3d] focus:border-[#467c69] focus:outline-hidden focus:ring-1 focus:ring-[#215b56]/10",
+        ),
+        rx.el.span(
+            hint,
+            class_name="mt-1 text-[9px] leading-snug text-[#89948a]",
+        ),
+        class_name="flex w-full min-w-[128px] max-w-[165px] flex-col",
+    )
+
+
+def answer_settings() -> rx.Component:
+    """Sampling hyperparameters for the grounded answer, laid out horizontally."""
+    return rx.el.div(
+        rx.el.div(
+            rx.icon(
+                "sliders-horizontal",
+                class_name="h-3.5 w-3.5 shrink-0 text-[#215b56]",
+            ),
+            rx.el.span(
+                "Answer settings",
+                class_name="text-xs font-semibold text-[#31453c]",
+            ),
+            rx.el.span(
+                "applied to the next question you ask",
+                class_name="text-[10px] text-[#84907f]",
+            ),
+            class_name="flex flex-wrap items-center gap-2",
+        ),
+        rx.el.div(
+            setting_control(
+                "Temperature",
+                "Lower = more focused, literal",
+                WorkspaceState.temperature,
+                WorkspaceState.update_temperature,
+                0,
+                2,
+                0.1,
+            ),
+            setting_control(
+                "Top-p",
+                "Nucleus sampling cut-off",
+                WorkspaceState.top_p,
+                WorkspaceState.update_top_p,
+                0,
+                1,
+                0.05,
+            ),
+            setting_control(
+                "Top-k",
+                "0 = model default (off)",
+                WorkspaceState.top_k,
+                WorkspaceState.update_top_k,
+                0,
+                100,
+                1,
+            ),
+            setting_control(
+                "Frequency penalty",
+                "Penalise repeated text",
+                WorkspaceState.frequency_penalty,
+                WorkspaceState.update_frequency_penalty,
+                -2,
+                2,
+                0.1,
+            ),
+            setting_control(
+                "Presence penalty",
+                "Encourage new topics",
+                WorkspaceState.presence_penalty,
+                WorkspaceState.update_presence_penalty,
+                -2,
+                2,
+                0.1,
+            ),
+            class_name="mt-3 flex flex-wrap items-end gap-4",
+        ),
+        class_name="mt-5 border-t border-[#e4e8dc] pt-4",
+    )
+
+
 def question_panel() -> rx.Component:
     return rx.el.section(
         rx.el.div(
@@ -969,6 +1072,7 @@ def question_panel() -> rx.Component:
                 class_name="mt-4 rounded-xl border border-[#dfe5d7] bg-[#f8faf5] p-4 md:p-5",
             ),
         ),
+        answer_settings(),
         class_name="mt-5 rounded-2xl border border-[#dfe5d7] bg-[#f4f7ee] p-5 md:p-6",
     )
 
