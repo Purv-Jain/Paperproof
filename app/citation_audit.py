@@ -10,6 +10,7 @@ from urllib.parse import quote
 import reflex as rx
 import requests
 
+from app.logging_safety import log_failure
 from app.states.paper_data import (
     ExtractionLine,
     Paper,
@@ -34,6 +35,7 @@ class AuditIssue(TypedDict):
     excerpt: str
     explanation: str
     action: str
+    severity: str
 
 
 class ReferenceAudit(TypedDict):
@@ -47,6 +49,29 @@ class ReferenceAudit(TypedDict):
     matched_title: str
     matched_author: str
     matched_year: str
+    parsed_author: str
+    parsed_title: str
+    parsed_year: str
+    parsed_venue: str
+    lookup_method: str
+    matched_fields: list[str]
+    conflicting_fields: list[str]
+    uncertainty: str
+    checked_at: str
+
+
+class AuditSummary(TypedDict):
+    citations_found: int
+    references_parsed: int
+    references_checked: int
+    confirmed: int
+    needing_review: int
+    extraction_warnings: int
+
+
+class AuditNote(TypedDict):
+    heading: str
+    body: str
 
 
 class AuditReport(TypedDict):
@@ -57,6 +82,43 @@ class AuditReport(TypedDict):
     issues: list[AuditIssue]
     references: list[ReferenceAudit]
     fix_prompt: str
+    counts: AuditSummary
+    explanation: list[AuditNote]
+    limits: list[str]
+
+
+# How serious each finding is. Severity drives the correction prompt grouping
+# and the visual weight in the interface.
+SEVERITY_BY_CATEGORY = {
+    "Citation missing from reference list": "high",
+    "Citation placement · manual review": "high",
+    "Bibliography extraction": "high",
+    "Conflicting publication year": "medium",
+    "Citation style not fully supported": "medium",
+    "Citation number out of range": "medium",
+    "Uncited reference": "medium",
+    "Possible duplicate reference": "medium",
+    "Incomplete reference formatting": "low",
+    "Verification limit": "low",
+}
+
+
+def issue(
+    category: str,
+    location: str,
+    excerpt: str,
+    explanation: str,
+    action: str,
+) -> AuditIssue:
+    """Build a finding, deriving its severity from the category."""
+    return AuditIssue(
+        category=category,
+        location=location,
+        excerpt=excerpt,
+        explanation=explanation,
+        action=action,
+        severity=SEVERITY_BY_CATEGORY.get(category, "low"),
+    )
 
 
 def empty_audit_report(paper_id: str = "") -> AuditReport:
@@ -68,6 +130,16 @@ def empty_audit_report(paper_id: str = "") -> AuditReport:
         issues=[],
         references=[],
         fix_prompt="",
+        counts=AuditSummary(
+            citations_found=0,
+            references_parsed=0,
+            references_checked=0,
+            confirmed=0,
+            needing_review=0,
+            extraction_warnings=0,
+        ),
+        explanation=[],
+        limits=[],
     )
 
 
@@ -122,6 +194,48 @@ def _body_passages(paper: Paper) -> list[Passage]:
     return _legacy_partition(paper)[0]
 
 
+VENUE_PATTERN = re.compile(
+    r"\b(journal|review|press|proceedings|publisher|transactions|"
+    r"annals|bulletin|quarterly|gazette|archives|reports?)\b",
+    re.IGNORECASE,
+)
+
+
+def _reference_venue(text: str) -> str:
+    """Best-effort source name, such as a journal or publisher.
+
+    In the common style the venue follows the title and runs up to the first
+    comma or volume marker, which is much more reliable than searching for a
+    keyword anywhere in the entry.
+    """
+    title = _reference_title(text)
+    if not title:
+        return ""
+    start = text.find(title)
+    if start < 0:
+        return ""
+    rest = text[start + len(title) :].lstrip(" .,:;-–—")
+    if not rest:
+        return ""
+    head = re.split(r"[,;]|\b\d+\s*\(", rest, maxsplit=1)[0]
+    head = re.sub(r"\s+", " ", head).strip(" .")
+    return head[:160]
+
+
+def _parse_reference(text: str) -> dict[str, str]:
+    """Pull structured fields out of one bibliography entry.
+
+    These are derived values. The original text is always kept alongside them
+    and is never overwritten.
+    """
+    return {
+        "parsed_author": _reference_author(text),
+        "parsed_title": _reference_title(text),
+        "parsed_year": _reference_year(text),
+        "parsed_venue": _reference_venue(text),
+    }
+
+
 def _references_for_paper(paper: Paper) -> tuple[list[ReferenceAudit], bool]:
     if (
         paper["source"] == "sample"
@@ -149,11 +263,17 @@ def _references_for_paper(paper: Paper) -> tuple[list[ReferenceAudit], bool]:
                 location=entry_location,
                 status="pending",
                 message="",
-                doi="",
+                doi=_doi_from_text(text),
                 url="",
                 matched_title="",
                 matched_author="",
                 matched_year="",
+                **_parse_reference(text),
+                lookup_method="",
+                matched_fields=[],
+                conflicting_fields=[],
+                uncertainty="",
+                checked_at="",
             )
         )
     return parsed, found_section
@@ -211,6 +331,56 @@ def _sentence_excerpt(text: str, start: int, end: int) -> str:
     ]
     right = min(right_candidates) + 1 if right_candidates else len(text)
     return " ".join(text[left:right].split())[:1000]
+
+
+# Bracketed numeric citations such as [1], [1, 2], or [1-3]. Bracketed years
+# like [2020] are excluded because four-digit runs cannot match this pattern.
+NUMERIC_CITATION = re.compile(
+    r"\[\s*\d{1,3}(?:\s*(?:,|;|-|–|—)\s*\d{1,3})*\s*\]"
+)
+
+
+def _citation_style(body_texts: list[str]) -> str:
+    """Classify the citation style used in the extracted body text.
+
+    Returns one of ``numeric``, ``mixed``, ``author_year``, or ``none``.
+    The author-year parser cannot resolve bracketed numeric citations, so
+    numeric and mixed documents must not be reported as having uncited or
+    missing references.
+    """
+    numeric = sum(len(NUMERIC_CITATION.findall(text)) for text in body_texts)
+    author_year = sum(len(_citation_records(text)) for text in body_texts)
+    if numeric and author_year:
+        return "mixed"
+    if numeric:
+        return "numeric"
+    return "author_year" if author_year else "none"
+
+
+def _numeric_citation_range(texts: list[str]) -> tuple[int, int]:
+    """Highest and count of bracketed numeric citations in the body."""
+    highest = 0
+    found = 0
+    for text in texts:
+        for group in NUMERIC_CITATION.findall(text):
+            for number in re.findall(r"\d{1,3}", group):
+                highest = max(highest, int(number))
+            found += 1
+    return highest, found
+
+
+def _citation_style_supported(style: str) -> bool:
+    """Report whether uncited-reference checks are meaningful for this style."""
+    return style in {"author_year", "none"}
+
+
+def _numeric_citation_excerpt(body_texts: list[str]) -> str:
+    """Return one sentence containing a numeric citation, for the finding."""
+    for text in body_texts:
+        match = NUMERIC_CITATION.search(text)
+        if match:
+            return _sentence_excerpt(text, match.start(), match.end())[:400]
+    return ""
 
 
 def _reference_year(text: str) -> str:
@@ -389,8 +559,8 @@ def _crossref_retry_delay(
                 requested_delay = max(
                     0.0, (retry_at - datetime.now(UTC)).total_seconds()
                 )
-            except (TypeError, ValueError, OverflowError):
-                logging.exception("Unexpected error")
+            except (TypeError, ValueError, OverflowError) as e:
+                log_failure("Reading a Crossref Retry-After header", e)
                 requested_delay = 0.0
         delay = max(delay, min(requested_delay, CROSSREF_MAX_RETRY_AFTER))
     return min(delay, CROSSREF_MAX_RETRY_AFTER)
@@ -414,6 +584,49 @@ def _crossref_get(
     raise RuntimeError("Crossref request retry loop ended unexpectedly.")
 
 
+def _record_check(
+    reference: ReferenceAudit,
+    status: str,
+    method: str,
+    message: str,
+    matched_fields: list[str] | None = None,
+    conflicting_fields: list[str] | None = None,
+    uncertainty: str = "",
+) -> ReferenceAudit:
+    """Stamp a verification outcome with its provenance and caveats."""
+    reference["status"] = status
+    reference["message"] = message
+    reference["lookup_method"] = method
+    reference["matched_fields"] = matched_fields or []
+    reference["conflicting_fields"] = conflicting_fields or []
+    reference["checked_at"] = datetime.now(UTC).isoformat(timespec="seconds")
+    reference["uncertainty"] = uncertainty
+    return reference
+
+
+def _conflicts(reference: ReferenceAudit, work: dict[str, object]) -> list[str]:
+    """Fields where the entry and the external record disagree."""
+    title, author, year, _ = _work_metadata(work)
+    conflicts: list[str] = []
+    expected_title = reference["parsed_title"]
+    expected_author = reference["parsed_author"]
+    expected_year = reference["parsed_year"]
+    if (
+        expected_title
+        and title
+        and SequenceMatcher(
+            None, _normalized_text(expected_title), _normalized_text(title)
+        ).ratio()
+        < 0.88
+    ):
+        conflicts.append("title")
+    if expected_author and author and _clean_author(expected_author) != _clean_author(author):
+        conflicts.append("first author")
+    if expected_year and year and expected_year != year:
+        conflicts.append("year")
+    return conflicts
+
+
 def _verify_reference(reference: ReferenceAudit) -> ReferenceAudit:
     text = reference["text"]
     doi = _doi_from_text(text)
@@ -427,11 +640,16 @@ def _verify_reference(reference: ReferenceAudit) -> ReferenceAudit:
                 headers=headers,
             )
             if response.status_code == 404:
-                reference["status"] = "not_found_in_crossref"
-                reference["message"] = (
-                    "No Crossref record was found for this DOI. This does not prove the work does not exist."
+                return _record_check(
+                    reference,
+                    "not_found_in_crossref",
+                    "doi",
+                    "No Crossref record was found for this DOI. This does not prove the work does not exist.",
+                    uncertainty=(
+                        "Crossref indexes most DOI-registered works but not "
+                        "every publisher or every older edition."
+                    ),
                 )
-                return reference
             response.raise_for_status()
             body = response.json()
             work = body.get("message") if isinstance(body, dict) else None
@@ -454,19 +672,25 @@ def _verify_reference(reference: ReferenceAudit) -> ReferenceAudit:
             reference["matched_author"] = author
             reference["matched_year"] = _crossref_year(work)
             if matches:
-                reference["status"] = "confirmed"
-                reference["url"] = (
-                    f"https://doi.org/{quote(returned_doi, safe='/')}"
+                return _record_check(
+                    reference,
+                    "confirmed",
+                    "doi",
+                    f"Exact DOI found in Crossref; {reasons}.",
+                    matched_fields=reasons.split(", ") if reasons else [],
                 )
-                reference["message"] = (
-                    f"Exact DOI found in Crossref; {reasons}."
-                )
-            else:
-                reference["status"] = "ambiguous"
-                reference["message"] = (
-                    "The DOI resolves in Crossref, but available title, first-author, or year metadata does not sufficiently match this entry. Review it manually."
-                )
-            return reference
+            conflicts = _conflicts(reference, work)
+            return _record_check(
+                reference,
+                "ambiguous",
+                "doi",
+                "The DOI resolves in Crossref, but available title, first-author, or year metadata does not sufficiently match this entry. Review it manually.",
+                conflicting_fields=conflicts,
+                uncertainty=(
+                    "The DOI resolved, so the work exists; the disagreement is "
+                    "between the supplied entry and the registered metadata."
+                ),
+            )
 
         response = _crossref_get(
             CROSSREF_URL,
@@ -482,11 +706,16 @@ def _verify_reference(reference: ReferenceAudit) -> ReferenceAudit:
         message = body.get("message") if isinstance(body, dict) else None
         items = message.get("items") if isinstance(message, dict) else None
         if not isinstance(items, list) or not items:
-            reference["status"] = "not_found_in_crossref"
-            reference["message"] = (
-                "No matching Crossref record was found. This does not prove the work does not exist or is not registered elsewhere."
+            return _record_check(
+                reference,
+                "not_found_in_crossref",
+                "bibliographic_search",
+                "No matching Crossref record was found. This does not prove the work does not exist or is not registered elsewhere.",
+                uncertainty=(
+                    "A bibliographic search matches on metadata only. A book "
+                    "chapter, report, or non-DOI source may not be indexed."
+                ),
             )
-            return reference
         matches: list[tuple[dict[str, object], str, str, str]] = []
         plausible = 0
         for item in items:
@@ -509,10 +738,6 @@ def _verify_reference(reference: ReferenceAudit) -> ReferenceAudit:
         if len(matches) == 1:
             work, reasons, title, author = matches[0]
             work_doi = work.get("DOI", "")
-            reference["status"] = "confirmed"
-            reference["message"] = (
-                f"A Crossref record matches the available title, first-author, and year metadata ({reasons})."
-            )
             reference["matched_title"] = title
             reference["matched_author"] = author
             reference["matched_year"] = _crossref_year(work)
@@ -521,7 +746,17 @@ def _verify_reference(reference: ReferenceAudit) -> ReferenceAudit:
                 reference["url"] = (
                     f"https://doi.org/{quote(work_doi, safe='/')}"
                 )
-            return reference
+            return _record_check(
+                reference,
+                "confirmed",
+                "bibliographic_search",
+                f"A Crossref record matches the available title, first-author, and year metadata ({reasons}).",
+                matched_fields=reasons.split(", ") if reasons else [],
+                uncertainty=(
+                    "Matched by metadata similarity, not by DOI. Confirm it is "
+                    "the intended work before relying on it."
+                ),
+            )
         reference["status"] = "ambiguous"
         reference["message"] = (
             "Multiple plausible Crossref records were found; choose the intended work manually."
@@ -533,9 +768,21 @@ def _verify_reference(reference: ReferenceAudit) -> ReferenceAudit:
             reference["matched_title"] = title
             reference["matched_author"] = author
             reference["matched_year"] = year
-        return reference
+        return _record_check(
+            reference,
+            "ambiguous",
+            "bibliographic_search",
+            reference["message"],
+            conflicting_fields=_conflicts(reference, items[0])
+            if items and isinstance(items[0], dict)
+            else [],
+            uncertainty=(
+                "More than one candidate matched, or none matched closely. The "
+                "closest record is shown, but it may be a different work."
+            ),
+        )
     except requests.exceptions.RequestException as e:
-        logging.exception("Unexpected error")
+        log_failure("Crossref lookup", e)
         response = e.response
         if response is not None:
             logging.warning(
@@ -543,20 +790,32 @@ def _verify_reference(reference: ReferenceAudit) -> ReferenceAudit:
                 response.status_code,
                 CROSSREF_MAX_ATTEMPTS,
             )
-            reference["message"] = (
+            message = (
                 f"Crossref returned HTTP {response.status_code} and this reference could not be verified. Try again later or verify the source manually."
             )
         else:
             logging.warning("Crossref lookup failed: %s", e)
-            reference["message"] = (
+            message = (
                 "Crossref could not be reached within the lookup time limit. Try again later or verify this reference manually."
             )
-        reference["status"] = "lookup_error"
+        return _record_check(
+            reference,
+            "lookup_error",
+            "doi" if doi else "bibliographic_search",
+            message,
+            uncertainty=(
+                "This is a temporary lookup failure, not a statement about the "
+                "reference. Re-run the audit later."
+            ),
+        )
     except (ValueError, TypeError, KeyError, AttributeError) as e:
-        logging.exception(f"Error: {e}")
-        reference["status"] = "lookup_error"
-        reference["message"] = (
-            "Crossref returned data that could not be checked safely. Verify this reference manually."
+        log_failure("Reading a Crossref response", e)
+        return _record_check(
+            reference,
+            "lookup_error",
+            "doi" if doi else "bibliographic_search",
+            "Crossref returned data that could not be checked safely. Verify this reference manually.",
+            uncertainty="The provider response could not be interpreted safely.",
         )
     return reference
 
@@ -585,6 +844,50 @@ def _build_issues(
     paper: Paper, references: list[ReferenceAudit], section_found: bool
 ) -> list[AuditIssue]:
     issues: list[AuditIssue] = []
+    body_passages = _body_passages(paper)
+    body_texts = [passage["text"] for passage in body_passages]
+    style = _citation_style(body_texts)
+    style_supported = _citation_style_supported(style)
+    if not style_supported:
+        issues.append(
+            issue(
+                category="Citation style not fully supported",
+                location="Document body",
+                excerpt=_numeric_citation_excerpt(body_texts),
+                explanation=(
+                    "This paper uses bracketed numeric citations, which Paperproof "
+                    "cannot map to reference entries. Author–year uncited and "
+                    "missing-reference checks are therefore withheld rather than "
+                    "reported inaccurately; every listed reference would otherwise "
+                    "appear uncited by mistake."
+                ),
+                action=(
+                    "Review the numbered citations against the reference list "
+                    "manually. Numeric citation coverage is not implemented yet."
+                ),
+            )
+        )
+    if not style_supported:
+        highest, _ = _numeric_citation_range(body_texts)
+        if references and highest > len(references):
+            issues.append(
+                issue(
+                    category="Citation number out of range",
+                    location="Document body",
+                    excerpt=_numeric_citation_excerpt(body_texts),
+                    explanation=(
+                        f"The body cites a numbered reference as high as "
+                        f"[{highest}], but only {len(references)} entries "
+                        "were separated from the reference list. Either the "
+                        "reference list was truncated during extraction, or a "
+                        "citation number is wrong."
+                    ),
+                    action=(
+                        "Count the entries in the original reference list and "
+                        "check the highest citation number against it."
+                    ),
+                )
+            )
     if paper["source"] != "sample" and not section_found:
         excerpt = ""
         for passage in paper["passages"]:
@@ -599,7 +902,7 @@ def _build_issues(
                 ].strip()
                 break
         issues.append(
-            AuditIssue(
+            issue(
                 category="Bibliography extraction",
                 location="Reference section not detected",
                 excerpt=excerpt
@@ -610,7 +913,7 @@ def _build_issues(
         )
     elif paper["source"] != "sample" and section_found and not references:
         issues.append(
-            AuditIssue(
+            issue(
                 category="Bibliography extraction",
                 location="Detected reference section",
                 excerpt="A bibliography heading was found, but no entries could be separated confidently.",
@@ -620,7 +923,7 @@ def _build_issues(
         )
 
     cited_references: set[str] = set()
-    for passage in _body_passages(paper):
+    for passage in body_passages:
         for author, year, start, end in _citation_records(passage["text"]):
             author_matches = [
                 reference
@@ -644,7 +947,7 @@ def _build_issues(
                         and _title_context_score(excerpt, reference) < 0.12
                     ):
                         issues.append(
-                            AuditIssue(
+                            issue(
                                 category="Citation placement · manual review",
                                 location=location,
                                 excerpt=excerpt,
@@ -657,7 +960,7 @@ def _build_issues(
                 cited_references.add(reference["id"])
                 listed_year = _reference_year(reference["text"])
                 issues.append(
-                    AuditIssue(
+                    issue(
                         category="Conflicting publication year",
                         location=location,
                         excerpt=excerpt,
@@ -667,7 +970,7 @@ def _build_issues(
                 )
             else:
                 issues.append(
-                    AuditIssue(
+                    issue(
                         category="Citation missing from reference list",
                         location=location,
                         excerpt=excerpt,
@@ -677,9 +980,9 @@ def _build_issues(
                 )
 
     for reference in references:
-        if reference["id"] not in cited_references:
+        if reference["id"] not in cited_references and style_supported:
             issues.append(
-                AuditIssue(
+                issue(
                     category="Uncited reference",
                     location=reference["location"],
                     excerpt=reference["text"][:1000],
@@ -703,7 +1006,7 @@ def _build_issues(
             missing.append("journal, publisher, DOI, or other source details")
         if missing:
             issues.append(
-                AuditIssue(
+                issue(
                     category="Incomplete reference formatting",
                     location=reference["location"],
                     excerpt=reference["text"][:1000],
@@ -740,7 +1043,7 @@ def _build_issues(
                 and (same_title or overlapping_entry)
             ):
                 issues.append(
-                    AuditIssue(
+                    issue(
                         category="Possible duplicate reference",
                         location=f"{reference['location']} and {other['location']}",
                         excerpt=f"{reference['text'][:450]}  /  {other['text'][:450]}",
@@ -755,38 +1058,227 @@ def _correction_prompt(
     paper: Paper,
     issues: list[AuditIssue],
     references: list[ReferenceAudit],
+    limits: list[str] | None = None,
 ) -> str:
     paper_label = (
         f"{paper['title']} ({paper['year']})"
         if paper["year"]
         else paper["title"]
     )
-    issue_lines = "\n".join(
-        f"- {issue['category']} — {issue['location']}: {issue['explanation']} Excerpt: “{issue['excerpt'][:350]}” Suggested action: {issue['action']}"
-        for issue in issues[:16]
-    )
-    if not issue_lines:
-        issue_lines = "- No actionable citation inconsistencies were detected by this automated audit. Please still verify every citation and reference against the source document."
-    verification_notes = [
-        f"- {reference['location']} — {reference['status']}: {reference['message']} Original reference entry: “{reference['text'][:700]}”"
+    limits = limits or []
+
+    def block(severity: str) -> str:
+        lines = [
+            f"- [{issue['category']}] {issue['location']}\n"
+            f"  Why: {issue['explanation']}\n"
+            f"  Excerpt: “{' '.join(issue['excerpt'].split())[:350]}”\n"
+            f"  Suggested action: {issue['action']}"
+            for issue in issues
+            if issue["severity"] == severity
+        ]
+        return "\n".join(lines) if lines else "- None."
+
+    verification_lines = "\n".join(
+        f"- {reference['location']} — {reference['status']} "
+        f"(looked up by {reference['lookup_method'] or 'no method'}): "
+        f"{reference['message']} "
+        f"Original entry: “{' '.join(reference['text'].split())[:700]}”"
+        + (
+            f" Conflicting fields: {', '.join(reference['conflicting_fields'])}."
+            if reference["conflicting_fields"]
+            else ""
+        )
         for reference in references
-        if reference["status"]
-        in {
-            "lookup_error",
-            "not_checked_limit",
-            "not_found_in_crossref",
-            "ambiguous",
-        }
+        if reference["status"] not in {"confirmed", "pending"}
+    ) or "- Every entry that was looked up matched an external record."
+
+    scope = (
+        "The audit compared author–year citations against separated bibliography "
+        "entries, checked entry completeness, year consistency, and duplicate "
+        "candidates, and looked up references externally where possible."
+    )
+    limitations = (
+        "\n".join(f"- {limit}" for limit in limits)
+        if limits
+        else "- Every supported check ran to completion."
+    )
+    counts = _build_counts(paper, references, issues)
+    return f"""Paper under review
+Title: {paper_label}
+Authors: {paper['authors']}
+
+Audit scope
+{scope}
+{counts['citations_found']} in-text citation(s), {counts['references_parsed']} bibliography entries, {counts['references_checked']} externally checked.
+
+Important limitations
+{limitations}
+
+These are leads for review, not automatic proof of error.
+
+Findings grouped by severity
+
+High severity — check these first
+{block('high')}
+
+Medium severity
+{block('medium')}
+
+Low severity
+{block('low')}
+
+Reference verification notes
+{verification_lines}
+
+Requested correction format
+- For each change, quote the original text, give the proposed replacement, and cite the source record that justifies it.
+- Preserve the paper's existing citation style exactly. Do not convert between styles.
+- Keep the authors' intended claims. Narrow a claim rather than silently rewriting it.
+
+Safety rules
+- Do not invent, guess, or complete any bibliographic detail.
+- Never fabricate a DOI, page range, author, or publication year.
+- If a field cannot be verified from the source record, mark it explicitly as unresolved and say what is needed.
+- If a finding turns out to be wrong after checking, say so rather than changing anything.
+- Return only changes supported by evidence you have actually seen."""[:12000]
+
+
+def _build_counts(
+    paper: Paper,
+    references: list[ReferenceAudit],
+    issues: list[AuditIssue],
+) -> AuditSummary:
+    citations = sum(
+        len(_citation_records(passage["text"]))
+        for passage in _body_passages(paper)
+    )
+    citations += sum(
+        len(NUMERIC_CITATION.findall(passage["text"]))
+        for passage in _body_passages(paper)
+    )
+    checked = sum(
+        1
+        for reference in references
+        if reference["status"] not in {"pending", "not_checked_limit"}
+    )
+    return AuditSummary(
+        citations_found=citations,
+        references_parsed=len(references),
+        references_checked=checked,
+        confirmed=sum(
+            1 for reference in references if reference["status"] == "confirmed"
+        ),
+        needing_review=sum(
+            1
+            for reference in references
+            if reference["status"]
+            in {
+                "ambiguous",
+                "partial_match",
+                "not_found_in_crossref",
+                "not_enough_metadata",
+                "lookup_error",
+            }
+        ),
+        extraction_warnings=len(paper.get("extraction_warnings", []) or []),
+    )
+
+
+def _build_explanation(
+    counts: AuditSummary,
+    issues: list[AuditIssue],
+    references: list[ReferenceAudit],
+    limits: list[str],
+) -> list[AuditNote]:
+    """The six-part plain-language explanation the audit interface shows."""
+    reliable = [
+        reference
+        for reference in references
+        if reference["status"] == "confirmed"
     ]
-    if verification_notes:
-        issue_lines = f"{issue_lines}\n" + "\n".join(verification_notes)
-    return (
-        f"Please review the citation and reference list in the paper “{paper_label}” by {paper['authors']}. "
-        "Use the audit notes below as leads, not as proof. Check every proposed change against the actual cited source and the paper's chosen citation style. "
-        "Do not invent, replace, or complete bibliographic details from guesswork; mark information that cannot be verified and ask for the source record. "
-        "Preserve the authors' intended claims, distinguish a possible mismatch from a verified mistake, and return only changes supported by evidence.\n\n"
-        f"Grounded audit findings:\n{issue_lines}"
-    )[:12000]
+    review = [
+        issue
+        for issue in issues
+        if issue["severity"] in {"high", "medium"}
+    ]
+    checked = [r for r in references if r["checked_at"]]
+    return [
+        AuditNote(
+            heading="What was checked",
+            body=(
+                f"{counts['citations_found']} in-text citation(s) were located "
+                f"and compared against {counts['references_parsed']} "
+                "bibliography entries. Entry completeness, duplicate "
+                "candidates, and year consistency were checked for every entry. "
+                f"{counts['references_checked']} entries were looked up "
+                "externally."
+            ),
+        ),
+        AuditNote(
+            heading="What was found",
+            body=(
+                f"{len(issues)} finding(s) need attention: "
+                + (
+                    ", ".join(
+                        f"{sum(1 for i in issues if i['severity'] == level)} "
+                        f"{level}-severity"
+                        for level in ("high", "medium", "low")
+                        if any(i["severity"] == level for i in issues)
+                    )
+                    or "none"
+                )
+                + "."
+            ),
+        ),
+        AuditNote(
+            heading="What appears reliable",
+            body=(
+                f"{counts['confirmed']} reference(s) matched an external "
+                "record on title, first author, and year."
+                if reliable
+                else "Nothing could be confirmed externally in this run."
+            ),
+        ),
+        AuditNote(
+            heading="What needs manual review",
+            body=(
+                "; ".join(
+                    f"{issue['category']} ({issue['location']})"
+                    for issue in review[:6]
+                )
+                + (f"; plus {len(review) - 6} more." if len(review) > 6 else "")
+            )
+            if review
+            else "Nothing was flagged for manual review."
+        ),
+        AuditNote(
+            heading="What could not be checked",
+            body=(
+                "; ".join(limits[:6])
+                if limits
+                else "Every supported check ran to completion."
+            ),
+        ),
+        AuditNote(
+            heading="What to do next",
+            body=(
+                "Open each finding in the source document and check it against "
+                "the cited work before changing anything. Treat every finding "
+                "as a lead, not a confirmed error."
+                if issues
+                else "Spot-check a few citations against the source records; "
+                "a clean audit is not a guarantee."
+            ),
+        ),
+        AuditNote(
+            heading="Lookup timestamps",
+            body=(
+                ", ".join(sorted({r["checked_at"] for r in checked}))[:300]
+                if checked
+                else "No external lookups completed."
+            ),
+        ),
+    ]
 
 
 def run_citation_audit(paper: Paper) -> AuditReport:
@@ -796,15 +1288,62 @@ def run_citation_audit(paper: Paper) -> AuditReport:
     for index in range(verified_count):
         if index:
             time.sleep(CROSSREF_REQUEST_INTERVAL)
-        references[index] = _verify_reference(references[index])
+        try:
+            references[index] = _verify_reference(references[index])
+        except Exception as e:
+            # One bad lookup must never cost the user the whole audit. Record
+            # it as a limit on that entry and carry on with the findings the
+            # structural pass already produced.
+            logging.exception("Unexpected error while verifying a reference")
+            references[index] = _record_check(
+                references[index],
+                "lookup_error",
+                "doi" if references[index]["doi"] else "bibliographic_search",
+                "This reference could not be verified because an unexpected "
+                "error interrupted the lookup.",
+                uncertainty=(
+                    "The lookup was abandoned mid-request. This says nothing "
+                    "about the reference itself; re-run the audit later."
+                ),
+            )
+        reference = references[index]
+        # An entry with too little metadata to search on is reported as its
+        # own status rather than as a lookup failure.
+        if (
+            reference["status"] == "not_found_in_crossref"
+            and not reference["parsed_title"]
+            and not reference["parsed_author"]
+            and not reference["doi"]
+        ):
+            _record_check(
+                reference,
+                "not_enough_metadata",
+                "none",
+                "This entry has too little readable metadata to look up safely, "
+                "so no search was attempted.",
+                uncertainty="A human can often identify this entry; an automatic lookup cannot.",
+            )
+        elif (
+            reference["status"] == "ambiguous"
+            and reference["matched_fields"]
+            and len(reference["matched_fields"]) < 3
+        ):
+            reference["status"] = "partial_match"
+            reference["message"] = (
+                f"Some metadata aligned ({', '.join(reference['matched_fields'])}) "
+                "but not enough to confirm this entry. Review it manually."
+            )
     for reference in references[verified_count:]:
-        reference["status"] = "not_checked_limit"
-        reference["message"] = (
-            f"Verification is limited to the first {MAX_VERIFIED_REFERENCES} entries per audit to avoid bursts of public API requests."
+        _record_check(
+            reference,
+            "not_checked_limit",
+            "none",
+            f"Verification is limited to the first {MAX_VERIFIED_REFERENCES} entries per audit to avoid bursts of public API requests.",
+            uncertainty="This entry was skipped entirely, not judged.",
         )
     if len(references) > MAX_VERIFIED_REFERENCES:
         issues.append(
-            AuditIssue(
+            issue(
                 category="Verification limit",
                 location="Reference list",
                 excerpt=f"{len(references)} entries detected; {MAX_VERIFIED_REFERENCES} were checked.",
@@ -816,15 +1355,56 @@ def run_citation_audit(paper: Paper) -> AuditReport:
         reference["status"] == "confirmed" for reference in references
     )
     unresolved_count = len(references) - confirmed_count
-    incomplete = (
-        not section_found
-        or not references
-        or len(references) > MAX_VERIFIED_REFERENCES
-        or any(
-            reference["status"] in {"lookup_error", "not_checked_limit"}
-            for reference in references
+    style = _citation_style([p["text"] for p in _body_passages(paper)])
+    style_supported = _citation_style_supported(style)
+    # Every reason the audit could not be complete, stated explicitly.
+    limits: list[str] = []
+    if not section_found:
+        limits.append(
+            "No bibliography heading was detected, so no cross-check was possible."
         )
-    )
+    if not references:
+        limits.append("No bibliography entries could be separated for comparison.")
+    if not style_supported:
+        limits.append(
+            "Citation style not fully supported: bracketed numeric citations "
+            "cannot be mapped to entries, so uncited and missing-reference "
+            "checks were withheld rather than reported inaccurately."
+        )
+    if len(references) > MAX_VERIFIED_REFERENCES:
+        limits.append(
+            f"Only the first {MAX_VERIFIED_REFERENCES} of "
+            f"{len(references)} entries were looked up externally."
+        )
+    skipped = [
+        r
+        for r in references
+        if r["status"] == "not_checked_limit"
+    ]
+    if skipped:
+        limits.append(f"{len(skipped)} entries were not checked at all.")
+    failed = [
+        r
+        for r in references
+        if r["status"] == "lookup_error"
+    ]
+    if failed:
+        limits.append(
+            f"{len(failed)} lookups failed, usually a temporary provider problem."
+        )
+    sparse = [
+        r
+        for r in references
+        if r["status"] == "not_enough_metadata"
+    ]
+    if sparse:
+        limits.append(
+            f"{len(sparse)} entries had too little metadata to look up safely."
+        )
+
+    incomplete = bool(limits)
+    counts = _build_counts(paper, references, issues)
+    explanation = _build_explanation(counts, issues, references, limits)
     if not references:
         summary = "No bibliography entries were available to compare. Review the extraction note below and check the document manually."
     else:
@@ -839,8 +1419,11 @@ def run_citation_audit(paper: Paper) -> AuditReport:
         issues=issues,
         references=references,
         fix_prompt="",
+        counts=counts,
+        explanation=explanation,
+        limits=limits,
     )
-    report["fix_prompt"] = _correction_prompt(paper, issues, references)
+    report["fix_prompt"] = _correction_prompt(paper, issues, references, limits)
     return report
 
 

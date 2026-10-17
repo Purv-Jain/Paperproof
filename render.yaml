@@ -35,6 +35,18 @@ services:
       # citation audit still works.
       - key: OPENROUTER_API_KEY
         sync: false
+      # Optional. Web search is off by default and is only attempted when a
+      # reader ticks "Include external context". With this key, search uses
+      # Google's grounding via Gemini; without it, Paperproof falls back to
+      # OpenRouter's web plugin, and with neither it reports that external
+      # context is unavailable rather than inventing sources.
+      - key: GEMINI_API_KEY
+        sync: false
+      # Optional model overrides. The defaults are free OpenRouter models that
+      # were verified to work; only set these if the chosen model stops being
+      # available to your account.
+      # - key: OPENROUTER_TEXT_MODEL
+      #   sync: false
 
 # Nothing else is needed. Caddy serves the frontend and proxies the backend from
 # a single origin, so the browser never applies its same-origin policy and no

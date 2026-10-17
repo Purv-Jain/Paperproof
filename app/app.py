@@ -1,6 +1,12 @@
 import reflex as rx
 
 from app.components.workspace import workspace
+from app.logging_safety import install_redaction
+from app.states.workspace_state import WorkspaceState
+
+# Installed before anything can log, so no credential can reach a handler even
+# if a future change logs one by mistake.
+install_redaction()
 
 
 def index() -> rx.Component:
@@ -27,4 +33,8 @@ app.add_page(
     route="/",
     title="Paperproof — A little more clarity",
     description="A welcoming research-paper workspace. Read teaching samples or upload a PDF or DOCX, ask grounded questions, and inspect cited evidence.",
+    # Reflex takes load events from add_page, not from a state method named
+    # on_load. This clears figures left on disk by an earlier run of the app
+    # before any paper is shown.
+    on_load=WorkspaceState.sweep_session_media,
 )

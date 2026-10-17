@@ -16,6 +16,9 @@ assets/xy/
 .node/
 !.env.example
 
+# Session image storage written by app/image_extraction.py
+.session_media/
+
 # Deployment artifacts from 'reflex export'
 frontend.zip
 backend.zip

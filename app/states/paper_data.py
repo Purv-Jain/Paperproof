@@ -9,7 +9,7 @@ from pathlib import Path
 import time
 from typing import NotRequired, TypedDict
 from uuid import uuid4
-from zipfile import ZipFile
+from zipfile import BadZipFile, ZipFile
 
 import pymupdf
 import pytesseract
@@ -19,6 +19,17 @@ from docx.text.paragraph import Paragraph
 from faker import Faker
 from PIL import Image
 from pypdf import PdfReader
+
+from app.image_extraction import (
+    ExtractionWarning,
+    PaperImage,
+    ResearchClassification,
+    extract_docx_images,
+    extract_pdf_images,
+    warning,
+)
+from app.logging_safety import log_failure
+from app.paper_classification import classify_research_paper
 
 
 class Passage(TypedDict):
@@ -42,11 +53,21 @@ class AnswerEvidence(TypedDict):
     section: str
     page: int
     text: str
+    kind: str
+    detail: str
 
 
 class Reference(TypedDict):
     id: str
     text: str
+    order: NotRequired[int]
+    raw_text: NotRequired[str]
+    authors: NotRequired[list[str]]
+    first_author: NotRequired[str]
+    year: NotRequired[str]
+    title: NotRequired[str]
+    doi: NotRequired[str]
+    url: NotRequired[str]
 
 
 class Paper(TypedDict):
@@ -62,6 +83,9 @@ class Paper(TypedDict):
     note: str
     passages: list[Passage]
     references: list[Reference]
+    images: NotRequired[list[PaperImage]]
+    extraction_warnings: NotRequired[list[ExtractionWarning]]
+    research_classification: NotRequired[ResearchClassification]
     bibliography_parsed: NotRequired[bool]
     bibliography_detected: NotRequired[bool]
 
@@ -98,6 +122,14 @@ def _paper(
             Reference(id=f"r{i + 1}", text=text)
             for i, text in enumerate(references)
         ],
+        images=[],
+        extraction_warnings=[],
+        research_classification=ResearchClassification(
+            outcome="accepted",
+            signals=[],
+            missing_signals=[],
+            message="Fictional teaching paper.",
+        ),
     )
 
 
@@ -523,7 +555,7 @@ def _pdf_prominent_lines(data: bytes) -> list[set[str]]:
                     }
                 )
     except Exception as e:
-        logging.exception(f"Error: {e}")
+        log_failure("PDF heading detection", e)
     return hints
 
 
@@ -610,12 +642,23 @@ def extract_uploaded_paper(filename: str, data: bytes) -> Paper:
         )
     passages: list[Passage] = []
     page_count = 0
+    document_warnings: list[ExtractionWarning] = []
     if suffix == ".pdf":
         if b"%PDF-" not in data[:1024]:
             raise ValueError(
                 "This file does not appear to be a PDF. Export it again from the original document."
             )
-        reader = PdfReader(BytesIO(data))
+        try:
+            reader = PdfReader(BytesIO(data))
+        except Exception as e:
+            # A truncated or structurally broken file raises a library-specific
+            # error. Convert it so every unreadable upload reports the same way,
+            # instead of surfacing an exception type the interface cannot read.
+            logging.warning("Could not parse PDF structure: %s", e)
+            raise ValueError(
+                "This PDF could not be opened. It may be truncated or "
+                "damaged. Export a fresh PDF and try again."
+            ) from e
         if reader.is_encrypted:
             raise ValueError(
                 "This PDF is password-protected. Upload an unlocked copy."
@@ -646,7 +689,7 @@ def extract_uploaded_paper(filename: str, data: bytes) -> Paper:
             try:
                 render_document = pymupdf.open(stream=data, filetype="pdf")
             except Exception as e:
-                logging.exception(f"Error: {e}")
+                log_failure("Opening a PDF for OCR", e)
                 ocr_incomplete = True
 
         ocr_started = time.monotonic()
@@ -676,7 +719,7 @@ def extract_uploaded_paper(filename: str, data: bytes) -> Paper:
                 else:
                     ocr_incomplete = True
             except Exception as e:
-                logging.exception(f"Error: {e}")
+                log_failure("OCR of a scanned page", e)
                 ocr_incomplete = True
             if total > MAX_TEXT:
                 if render_document is not None:
@@ -708,32 +751,134 @@ def extract_uploaded_paper(filename: str, data: bytes) -> Paper:
         note = "PDF sections and reference entries detected from text and heading cues; unusual layouts, equations, and tables may not be preserved. Page numbers match the file. Extracted references are as supplied, not verified."
         if ocr_pages_read and ocr_incomplete:
             note = f"{note} English OCR recovered text from {ocr_pages_read} scanned page(s), but some pages could not be read or were skipped because of processing limits. Try a clearer scan for the remaining pages."
+            document_warnings.append(
+                warning(
+                    "ocr_partial",
+                    "Scanned pages",
+                    "warning",
+                    "Text was recovered from some scanned pages only. The "
+                    "remaining pages were skipped or could not be read.",
+                    "Upload a clearer scan to recover the rest of this paper.",
+                )
+            )
         elif ocr_pages_read:
             note = f"{note} English OCR was used on {ocr_pages_read} scanned page(s)."
         elif scanned_page_indexes:
             note = f"{note} Automatic English OCR could not recover readable text from the scanned pages. Try a clearer scan or upload a searchable PDF."
-    else:
-        with ZipFile(BytesIO(data)) as archive:
-            if (
-                sum(info.file_size for info in archive.infolist())
-                > 40 * 1024 * 1024
-            ):
-                raise ValueError(
-                    "This DOCX expands beyond the safe processing limit. Upload a simpler copy."
+            document_warnings.append(
+                warning(
+                    "ocr_failed",
+                    "Scanned pages",
+                    "warning",
+                    "OCR could not recover readable text from the scanned "
+                    "pages in this document.",
+                    "Upload a clearer or higher-resolution scan.",
                 )
+            )
+        if bibliography_detected and not references:
+            document_warnings.append(
+                warning(
+                    "bibliography_entries_not_separated",
+                    "References",
+                    "warning",
+                    "A bibliography heading was found, but entries could not be "
+                    "separated into individual references.",
+                    "Check the reference layout in the source document and add "
+                    "clear paragraph breaks between entries.",
+                )
+            )
+    else:
+        try:
+            with ZipFile(BytesIO(data)) as archive:
+                if (
+                    sum(info.file_size for info in archive.infolist())
+                    > 40 * 1024 * 1024
+                ):
+                    raise ValueError(
+                        "This DOCX expands beyond the safe processing limit. Upload a simpler copy."
+                    )
+        except BadZipFile as e:
+            raise ValueError(
+                "This file is not a readable DOCX document. If it opens in "
+                "Word, export a fresh copy as .docx and try again."
+            ) from e
         document = Document(BytesIO(data))
         passages, references, bibliography_detected = _partition_lines(
             _docx_lines(document), "Document text"
         )
-        note = "DOCX sections detected from heading styles and standalone heading cues; paragraphs and tables retain document order. Page numbers are unavailable. Images, footnotes, and text boxes may be omitted. Extracted references are as supplied, not verified."
+        note = "DOCX sections detected from heading styles and standalone heading cues; paragraphs and tables retain document order. Page numbers are unavailable. Footnotes and text boxes may be omitted. Extracted references are as supplied, not verified."
+        document_warnings.append(
+            warning(
+                "docx_page_numbers_unavailable",
+                "Whole document",
+                "info",
+                "DOCX files do not carry reliable page numbers, so figure and "
+                "section locations are reported without a page.",
+                "Use the section heading to find a location in the source file.",
+            )
+        )
+        if bibliography_detected and not references:
+            document_warnings.append(
+                warning(
+                    "bibliography_entries_not_separated",
+                    "References",
+                    "warning",
+                    "A bibliography heading was found, but entries could not be "
+                    "separated into individual references.",
+                    "Check the reference layout in the source document and add "
+                    "clear paragraph breaks between entries.",
+                )
+            )
     if not passages or not any(
         any(c.isalnum() for c in p["text"]) for p in passages
     ):
         raise ValueError(
             "No readable text was found. Paperproof tries English OCR automatically for image-only PDFs; upload a clearer, higher-resolution scan or a searchable PDF if the text still cannot be read."
         )
+    paper_id = f"upload-{uuid4().hex}"
+    extraction_warnings = list(document_warnings)
+    images: list[PaperImage] = []
+    try:
+        if suffix == ".pdf":
+            images, image_warnings = extract_pdf_images(
+                paper_id, data, passages
+            )
+        else:
+            images, image_warnings = extract_docx_images(
+                paper_id, document, passages
+            )
+    except Exception as e:
+        log_failure("Figure extraction", e)
+        images = []
+        image_warnings = [
+            warning(
+                "image_extraction_failed",
+                "Figures and images",
+                "warning",
+                "Images could not be read from this document. Text analysis is unaffected.",
+                "Open the source document to view its figures.",
+            )
+        ]
+    extraction_warnings.extend(image_warnings)
+    classification = classify_research_paper(
+        passages,
+        references,
+        images=images,
+        bibliography_detected=bibliography_detected,
+    )
+    if not images:
+        extraction_warnings.append(
+            warning(
+                "no_images_found",
+                "Figures and images",
+                "info",
+                "No embedded figures were found in this document.",
+                "Figures drawn as vector shapes, or a scanned paper whose pages "
+                "are a single image, may not appear here.",
+            )
+        )
     return Paper(
-        id=f"upload-{uuid4().hex}",
+        id=paper_id,
         title=Path(filename).stem,
         authors="Author details not extracted",
         year="",
@@ -745,6 +890,9 @@ def extract_uploaded_paper(filename: str, data: bytes) -> Paper:
         note=note,
         passages=passages,
         references=references,
+        images=images,
+        extraction_warnings=extraction_warnings,
+        research_classification=classification,
         bibliography_parsed=True,
         bibliography_detected=bibliography_detected,
     )

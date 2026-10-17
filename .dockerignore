@@ -19,6 +19,7 @@ __pycache__
 
 # Runtime scratch (written by the container as the `reflex` user).
 uploaded_files
+.session_media
 *.db
 frontend.zip
 backend.zip

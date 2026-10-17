@@ -1,6 +1,13 @@
 import reflex as rx
 
 from app.citation_audit import AuditIssue, ReferenceAudit
+from app.image_extraction import (
+    UPLOAD_URL_PREFIX,
+    ExtractionWarning,
+    PaperImage,
+)
+from app.model_config import CapabilityCheck
+from app.search_provenance import SearchSource
 from app.states.paper_data import AnswerEvidence, Paper, Passage, Reference
 from app.states.workspace_state import WorkspaceState
 
@@ -52,7 +59,9 @@ def guide() -> rx.Component:
             guide_step(
                 "01",
                 "Choose a paper",
-                "Try a teaching sample, or upload a PDF or DOCX. Scanned PDFs are read with OCR automatically.",
+                "Try a teaching sample, or upload a PDF or DOCX. Scanned PDFs "
+                "are read with OCR automatically. If a document does not look "
+                "like a research paper, Paperproof asks before opening it.",
             ),
             guide_step(
                 "02",
@@ -125,6 +134,119 @@ def paper_choice(paper: Paper) -> rx.Component:
             WorkspaceState.selected_id == paper["id"],
             "w-full rounded-xl border border-[#48756a] bg-[#edf3ed] p-4 text-left transition-colors focus-visible:outline-2 focus-visible:outline-[#215b56] disabled:opacity-60",
             "w-full rounded-xl border border-[#e6e7df] bg-[#fffefa] p-4 text-left transition-colors hover:border-[#95aca1] hover:bg-[#f5f7f1] focus-visible:outline-2 focus-visible:outline-[#215b56] disabled:opacity-60",
+        ),
+    )
+
+
+def classification_note() -> rx.Component:
+    """Non-blocking note for a paper that opened with structural warnings."""
+    return rx.cond(
+        WorkspaceState.selected_paper["research_classification"]["outcome"]
+        == "accepted_with_warnings",
+        rx.el.div(
+            rx.el.div(
+                rx.icon(
+                    "triangle-alert",
+                    class_name="mt-0.5 h-3.5 w-3.5 shrink-0 text-[#bc7567]",
+                ),
+                rx.el.p(
+                    WorkspaceState.selected_paper["research_classification"][
+                        "message"
+                    ],
+                    class_name="text-[11px] leading-relaxed text-[#5f6c64]",
+                ),
+                class_name="flex gap-2.5",
+            ),
+            rx.el.p(
+                "Paperproof could not recognise every usual section. Papers "
+                "differ in layout, so this is a reading hint, not a "
+                "judgement about the quality of the work.",
+                class_name="mt-2 text-[10px] leading-relaxed text-[#87917f]",
+            ),
+            class_name="border-t border-[#ece8da] bg-[#fdf6f1] px-5 py-3 md:px-7",
+        ),
+    )
+
+
+def pending_upload_panel() -> rx.Component:
+    """Confirmation step for a document Paperproof would not open silently."""
+    return rx.cond(
+        (WorkspaceState.pending_upload != None)
+        & (WorkspaceState.pending_classification != None),
+        rx.el.div(
+            rx.el.div(
+                rx.el.span(
+                    "Is this a research paper?",
+                    class_name="text-sm font-semibold text-[#202e3b]",
+                ),
+                rx.el.p(
+                    WorkspaceState.pending_upload["filename"],
+                    class_name="mt-1 text-xs text-[#6f7c75]",
+                ),
+                class_name="mb-3",
+            ),
+            rx.el.p(
+                WorkspaceState.pending_classification["message"],
+                role="alert",
+                class_name="text-xs leading-relaxed text-[#43524d]",
+            ),
+            rx.el.div(
+                rx.el.p(
+                    "WHAT PAPERPROOF FOUND",
+                    class_name="mb-1 text-[9px] font-semibold tracking-[0.12em] text-[#889184]",
+                ),
+                rx.el.ul(
+                    rx.foreach(
+                        WorkspaceState.pending_classification["signals"],
+                        lambda signal: rx.el.li(
+                            signal,
+                            class_name="text-[11px] leading-relaxed text-[#69766e]",
+                        ),
+                    ),
+                    class_name="flex flex-col gap-0.5",
+                ),
+                rx.el.p(
+                    "NOT FOUND OR UNRECOGNISED",
+                    class_name="mt-3 mb-1 text-[9px] font-semibold tracking-[0.12em] text-[#889184]",
+                ),
+                rx.el.ul(
+                    rx.foreach(
+                        WorkspaceState.pending_classification[
+                            "missing_signals"
+                        ],
+                        lambda signal: rx.el.li(
+                            signal,
+                            class_name="text-[11px] leading-relaxed text-[#8a8073]",
+                        ),
+                    ),
+                    class_name="flex flex-col gap-0.5",
+                ),
+                class_name="mt-3 rounded-lg bg-[#fafbf5] p-3",
+            ),
+            rx.el.p(
+                "Nothing has been added to your session yet. If you recognise "
+                "this as a paper, open it. Paperproof never edits or "
+                "rejects the file itself.",
+                class_name="mt-3 text-[11px] leading-relaxed text-[#7c8579]",
+            ),
+            rx.el.div(
+                rx.el.button(
+                    rx.icon("book-open-check", class_name="h-3.5 w-3.5"),
+                    "Yes, open this paper",
+                    on_click=WorkspaceState.confirm_pending_upload,
+                    disabled=WorkspaceState.uploading,
+                    class_name="flex items-center gap-2 rounded-lg bg-[#215b56] px-4 py-2.5 text-xs font-semibold text-white transition-colors hover:bg-[#174842] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#215b56] disabled:opacity-60",
+                ),
+                rx.el.button(
+                    rx.icon("trash-2", class_name="h-3.5 w-3.5"),
+                    "Discard it",
+                    on_click=WorkspaceState.discard_pending_upload,
+                    disabled=WorkspaceState.uploading,
+                    class_name="flex items-center gap-2 rounded-lg border border-[#dce2d4] bg-[#fffefa] px-4 py-2.5 text-xs font-semibold text-[#5f7268] transition-colors hover:bg-[#f0f4ed] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#215b56] disabled:opacity-60",
+                ),
+                class_name="mt-4 flex flex-wrap gap-3",
+            ),
+            class_name="mt-4 rounded-xl border border-[#e3d6b4] bg-[#fbf6e8] p-4",
         ),
     )
 
@@ -227,9 +349,15 @@ def upload_panel() -> rx.Component:
         ),
         rx.el.p(
             rx.icon("lock-keyhole", class_name="mt-0.5 h-3 w-3 shrink-0"),
-            "Your file stays in this session only. Citation-audit bibliography entries are sent to Crossref; claim excerpts are not sent to OpenRouter by this audit. Asking a question sends relevant excerpts to OpenRouter. Scanned PDFs use English OCR.",
+            "Your file stays in this session only. Figures are extracted and "
+            "read on this server: image pixels are never sent to an external "
+            "model. Citation-audit bibliography entries are sent to Crossref; "
+            "claim excerpts are not sent to OpenRouter by this audit. Asking a "
+            "question sends relevant text excerpts to OpenRouter. Scanned PDFs "
+            "and figures use English OCR.",
             class_name="mt-3 flex gap-2 text-[11px] leading-relaxed text-[#7b847b]",
         ),
+        pending_upload_panel(),
         class_name="rounded-2xl border border-[#e3e4da] bg-[#fffefa] p-5",
     )
 
@@ -309,6 +437,189 @@ def reference_row(reference: Reference) -> rx.Component:
     )
 
 
+def image_src(paper_id, filename) -> str:
+    """Stored URL for one figure.
+
+    Both parts were generated and validated by the extractor when written to
+    disk (see `media_dir`), so this only formats a path for the browser. The
+    paper id is a uuid4 that is never published outside the session, which
+    makes this a capability URL rather than an enumerable listing.
+    """
+    return f"{UPLOAD_URL_PREFIX}/{paper_id}/{filename}"
+
+
+def figure_card(paper_id, image: PaperImage) -> rx.Component:
+    source = image_src(paper_id, image["filename"])
+    return rx.el.li(
+        rx.el.img(
+            src=source,
+            alt=rx.cond(
+                image["caption"] != "",
+                image["caption"],
+                f"Figure {image['order'] + 1} from this paper",
+            ),
+            loading="lazy",
+            class_name="w-full rounded-lg border border-[#e4e7db] bg-white object-contain",
+        ),
+        rx.el.p(
+            rx.cond(
+                image["caption"] != "",
+                image["caption"],
+                "No caption was found near this figure.",
+            ),
+            class_name="mt-2 text-xs leading-relaxed text-[#43524d]",
+        ),
+        rx.el.div(
+            rx.el.span(
+                rx.icon("layers", class_name="h-3 w-3"),
+                rx.cond(
+                    image["page"] > 0,
+                    f"Page {image['page']}",
+                    "Page unavailable (DOCX)",
+                ),
+                class_name="flex items-center gap-1.5",
+            ),
+            rx.el.span(
+                rx.icon("tag", class_name="h-3 w-3"),
+                f"Type: {image['image_kind']}",
+                class_name="flex items-center gap-1.5",
+            ),
+            rx.cond(
+                image["section"] != "",
+                rx.el.span(
+                    rx.icon("heading", class_name="h-3 w-3"),
+                    image["section"],
+                    class_name="flex items-center gap-1.5",
+                ),
+            ),
+            class_name="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[10px] text-[#7a877b]",
+        ),
+        rx.cond(
+            image["ocr_text"] != "",
+            rx.el.div(
+                rx.el.p(
+                    "TEXT FOUND INSIDE THIS FIGURE",
+                    class_name="mb-1 text-[9px] font-semibold tracking-[0.12em] text-[#889184]",
+                ),
+                rx.el.p(
+                    image["ocr_text"],
+                    class_name="whitespace-pre-wrap text-[11px] leading-relaxed text-[#5f6c64]",
+                ),
+                class_name="mt-2 rounded-md bg-[#f4f7ee] p-2",
+            ),
+        ),
+        rx.cond(
+            image["surrounding_text"] != "",
+            rx.el.p(
+                rx.el.span(
+                    "Nearby text: ",
+                    class_name="font-semibold text-[#5f7268]",
+                ),
+                image["surrounding_text"],
+                class_name="mt-2 text-[11px] leading-relaxed text-[#69766e]",
+            ),
+        ),
+        class_name="rounded-xl border border-[#e6e4d8] bg-[#fffefa] p-4",
+    )
+
+
+def figures_panel() -> rx.Component:
+    """Figures tab. Always renders, so an extraction failure stays visible."""
+    return rx.el.div(
+        rx.cond(
+            WorkspaceState.selected_images.length() > 0,
+            rx.el.div(
+                rx.el.h3(
+                    f"Figures & images · {WorkspaceState.selected_images.length()} item(s)",
+                    class_name="font-['Lora'] text-xl text-[#263a3d]",
+                ),
+                rx.el.p(
+                    "Figures are read locally from the document. Text inside a "
+                    "figure is recovered with OCR, and the caption and nearby "
+                    "paper text are shown for context. Paperproof does not "
+                    "interpret what a figure looks like, so no claim is made "
+                    "about a chart's shape or trend.",
+                    class_name="mt-2 max-w-2xl text-xs leading-relaxed text-[#7d887c]",
+                ),
+                rx.el.ul(
+                    rx.foreach(
+                        WorkspaceState.selected_images,
+                        lambda image: figure_card(
+                            WorkspaceState.selected_paper["id"], image
+                        ),
+                    ),
+                    class_name="mt-4 flex flex-col gap-3",
+                ),
+            ),
+            rx.el.div(
+                rx.icon("image-off", class_name="mb-4 h-7 w-7 text-[#79917b]"),
+                rx.el.h3(
+                    "No figures were extracted",
+                    class_name="font-['Lora'] text-xl text-[#263a3d]",
+                ),
+                rx.el.p(
+                    "This paper has no embedded images Paperproof could read. "
+                    "Figures drawn as vector shapes, or a scanned paper whose "
+                    "pages are one large image, often cannot be separated this "
+                    "way. The paper text and the citation audit still work "
+                    "normally, and the figures remain visible in the source file.",
+                    class_name="mt-3 max-w-xl text-sm leading-relaxed text-[#7d887c]",
+                ),
+                class_name="py-6",
+            ),
+        ),
+        class_name="min-h-[330px] px-5 py-6 md:px-7",
+    )
+
+
+def extraction_warning_row(item: ExtractionWarning) -> rx.Component:
+    tones = {
+        "error": "border-[#e6b4a8] bg-[#fdf1ed] text-[#9d6257]",
+        "warning": "border-[#e3d6b4] bg-[#fbf6e8] text-[#8a7338]",
+        "info": "border-[#dfe3d6] bg-[#f7f9f3] text-[#69766e]",
+    }
+    return rx.el.li(
+        rx.el.p(
+            item["message"],
+            class_name="text-[11px] leading-relaxed text-[#5f6c64]",
+        ),
+        rx.el.p(
+            rx.el.span(
+                "Next step: ", class_name="font-semibold text-[#315e54]"
+            ),
+            item["recommended_action"],
+            class_name="mt-1 text-[11px] leading-relaxed text-[#315e54]",
+        ),
+        class_name=rx.match(
+            item["severity"],
+            ("error", tones["error"]),
+            ("warning", tones["warning"]),
+            tones["info"],
+        ),
+    )
+
+
+def extraction_warnings_panel() -> rx.Component:
+    """Extraction warnings, kept visible under the reader."""
+    return rx.cond(
+        WorkspaceState.selected_extraction_warnings.length() > 0,
+        rx.el.div(
+            rx.el.p(
+                "Extraction notes",
+                class_name="text-[10px] font-semibold uppercase tracking-[0.12em] text-[#889184]",
+            ),
+            rx.el.ul(
+                rx.foreach(
+                    WorkspaceState.selected_extraction_warnings,
+                    extraction_warning_row,
+                ),
+                class_name="mt-2 flex flex-col gap-2",
+            ),
+            class_name="border-t border-[#ece8da] bg-[#fbf7ed] px-5 py-4 md:px-7",
+        ),
+    )
+
+
 def paper_reader() -> rx.Component:
     return rx.el.section(
         rx.el.div(
@@ -373,7 +684,13 @@ def paper_reader() -> rx.Component:
         rx.el.div(
             rx.el.button(
                 rx.icon("book-open", class_name="h-3.5 w-3.5"),
-                "Paper text",
+                rx.el.span(
+                    "Paper text",
+                    rx.el.span(
+                        f" · {WorkspaceState.selected_section_count} sections",
+                        class_name="font-normal opacity-70",
+                    ),
+                ),
                 on_click=WorkspaceState.show_body,
                 aria_pressed=WorkspaceState.reader_tab == "body",
                 class_name=rx.cond(
@@ -384,7 +701,13 @@ def paper_reader() -> rx.Component:
             ),
             rx.el.button(
                 rx.icon("quote", class_name="h-3.5 w-3.5"),
-                "References",
+                rx.el.span(
+                    "References",
+                    rx.el.span(
+                        f" · {WorkspaceState.selected_paper['references'].length()} entries",
+                        class_name="font-normal opacity-70",
+                    ),
+                ),
                 on_click=WorkspaceState.show_references,
                 aria_pressed=WorkspaceState.reader_tab == "references",
                 class_name=rx.cond(
@@ -393,10 +716,30 @@ def paper_reader() -> rx.Component:
                     "flex items-center gap-2 border-b-2 border-transparent bg-transparent px-1 py-3 text-xs text-[#7e887e] hover:text-[#215b56]",
                 ),
             ),
-            class_name="flex gap-7 border-y border-[#e9ebdf] px-5 md:px-7",
+            rx.el.button(
+                rx.icon("image", class_name="h-3.5 w-3.5"),
+                rx.el.span(
+                    "Figures & images",
+                    rx.el.span(
+                        f" · {WorkspaceState.selected_images.length()} items",
+                        class_name="font-normal opacity-70",
+                    ),
+                ),
+                on_click=WorkspaceState.show_figures,
+                aria_pressed=WorkspaceState.reader_tab == "figures",
+                class_name=rx.cond(
+                    WorkspaceState.reader_tab == "figures",
+                    "flex items-center gap-2 border-b-2 border-[#215b56] bg-transparent px-1 py-3 text-xs font-semibold text-[#215b56]",
+                    "flex items-center gap-2 border-b-2 border-transparent bg-transparent px-1 py-3 text-xs text-[#7e887e] hover:text-[#215b56]",
+                ),
+            ),
+            class_name="flex flex-wrap gap-x-7 gap-y-1 border-y border-[#e9ebdf] px-5 md:px-7",
         ),
         rx.cond(
-            WorkspaceState.reader_tab == "body",
+            WorkspaceState.reader_tab == "figures",
+            figures_panel(),
+            rx.cond(
+                WorkspaceState.reader_tab == "body",
             rx.el.div(
                 rx.el.nav(
                     rx.el.p(
@@ -500,6 +843,9 @@ def paper_reader() -> rx.Component:
                 class_name="min-h-[330px] px-5 py-6 md:px-7",
             ),
         ),
+        ),
+        extraction_warnings_panel(),
+        classification_note(),
         rx.el.div(
             rx.icon(
                 "info", class_name="mt-0.5 h-3.5 w-3.5 shrink-0 text-[#b98170]"
@@ -517,9 +863,13 @@ def paper_reader() -> rx.Component:
 def audit_issue(issue: AuditIssue) -> rx.Component:
     return rx.el.article(
         rx.el.div(
-            rx.el.span(
-                issue["category"],
-                class_name="w-fit rounded-full bg-[#f7e9e3] px-2.5 py-1 text-[10px] font-semibold text-[#9d6257]",
+            rx.el.div(
+                rx.el.span(
+                    issue["category"],
+                    class_name="w-fit rounded-full bg-[#f7e9e3] px-2.5 py-1 text-[10px] font-semibold text-[#9d6257]",
+                ),
+                severity_badge(issue["severity"]),
+                class_name="flex flex-wrap items-center gap-2",
             ),
             rx.el.span(
                 issue["location"],
@@ -547,6 +897,18 @@ def audit_issue(issue: AuditIssue) -> rx.Component:
     )
 
 
+VERIFICATION_LABEL = {
+    "confirmed": "Metadata match",
+    "partial_match": "Partial match · review",
+    "ambiguous": "Manual review",
+    "not_found_in_crossref": "No Crossref match",
+    "not_enough_metadata": "Not enough metadata",
+    "lookup_error": "Lookup unavailable",
+    "not_checked_limit": "Not checked · audit limit",
+    "pending": "Pending check",
+}
+
+
 def verification_row(reference: ReferenceAudit) -> rx.Component:
     return rx.el.li(
         rx.el.div(
@@ -554,12 +916,23 @@ def verification_row(reference: ReferenceAudit) -> rx.Component:
                 rx.el.span(
                     rx.match(
                         reference["status"],
-                        ("confirmed", "Metadata match"),
-                        ("ambiguous", "Manual review"),
-                        ("not_found_in_crossref", "No Crossref match"),
-                        ("lookup_error", "Lookup unavailable"),
-                        ("not_checked_limit", "Not checked · audit limit"),
-                        "Pending check",
+                        ("confirmed", VERIFICATION_LABEL["confirmed"]),
+                        ("partial_match", VERIFICATION_LABEL["partial_match"]),
+                        ("ambiguous", VERIFICATION_LABEL["ambiguous"]),
+                        (
+                            "not_found_in_crossref",
+                            VERIFICATION_LABEL["not_found_in_crossref"],
+                        ),
+                        (
+                            "not_enough_metadata",
+                            VERIFICATION_LABEL["not_enough_metadata"],
+                        ),
+                        ("lookup_error", VERIFICATION_LABEL["lookup_error"]),
+                        (
+                            "not_checked_limit",
+                            VERIFICATION_LABEL["not_checked_limit"],
+                        ),
+                        VERIFICATION_LABEL["pending"],
                     ),
                     class_name=rx.cond(
                         reference["status"] == "confirmed",
@@ -590,6 +963,39 @@ def verification_row(reference: ReferenceAudit) -> rx.Component:
                 class_name="mt-2 text-[11px] leading-relaxed text-[#69766e]",
             ),
             rx.cond(
+                reference["lookup_method"] != "",
+                rx.el.p(
+                    f"Lookup method: {reference['lookup_method']} · checked {reference['checked_at']}",
+                    class_name="mt-1 text-[10px] text-[#87917f]",
+                ),
+            ),
+            rx.cond(
+                reference["conflicting_fields"].length() > 0,
+                rx.el.div(
+                    rx.el.span(
+                        "Fields in conflict",
+                        class_name="mr-1.5 text-[10px] text-[#9d6257]",
+                    ),
+                    rx.el.span(
+                        rx.foreach(
+                            reference["conflicting_fields"],
+                            lambda field: rx.el.span(
+                                field,
+                                class_name="mr-1 rounded bg-[#f7e9e3] px-1.5 py-0.5 text-[10px] font-medium text-[#9d6257]",
+                            ),
+                        ),
+                    ),
+                    class_name="mt-1 flex flex-wrap items-center",
+                ),
+            ),
+            rx.cond(
+                reference["uncertainty"] != "",
+                rx.el.p(
+                    reference["uncertainty"],
+                    class_name="mt-1 text-[10px] italic leading-relaxed text-[#87917f]",
+                ),
+            ),
+            rx.cond(
                 reference["url"] != "",
                 rx.el.a(
                     rx.icon("external-link", class_name="h-3 w-3"),
@@ -603,6 +1009,83 @@ def verification_row(reference: ReferenceAudit) -> rx.Component:
             class_name="py-3 first:pt-0 last:pb-0",
         ),
         class_name="border-b border-[#e8e7dc] last:border-0",
+    )
+
+
+SEVERITY_STYLE = {
+    "high": "border-l-[#b9563f] bg-[#fdf1ed] text-[#8f4632]",
+    "medium": "border-l-[#c9a227] bg-[#fbf6e8] text-[#7d6a1f]",
+    "low": "border-l-[#9aab9f] bg-[#f7f9f4] text-[#5f7268]",
+}
+SEVERITY_LABEL = {"high": "High", "medium": "Medium", "low": "Low"}
+
+
+def severity_badge(severity: str) -> rx.Component:
+    return rx.el.span(
+        SEVERITY_LABEL.get(severity, severity),
+        class_name=(
+            "ml-2 w-fit rounded-md border-l-2 px-2 py-0.5 text-[10px] "
+            "font-semibold " + SEVERITY_STYLE.get(severity, SEVERITY_STYLE["low"])
+        ),
+    )
+
+
+def summary_cards() -> rx.Component:
+    counts = WorkspaceState.selected_audit["counts"]
+    cards = [
+        ("Citations found", "citations_found"),
+        ("References parsed", "references_parsed"),
+        ("Externally checked", "references_checked"),
+        ("Confirmed matches", "confirmed"),
+        ("Needing review", "needing_review"),
+        ("Extraction warnings", "extraction_warnings"),
+    ]
+    return rx.el.div(
+        rx.foreach(
+            cards,
+            lambda card: rx.el.div(
+                rx.el.p(
+                    card[1],
+                    class_name="text-[9px] font-semibold uppercase tracking-[0.1em] text-[#87917f]",
+                ),
+                rx.el.p(
+                    counts[card[1]].to_string(),
+                    class_name="mt-1 font-['Lora'] text-2xl text-[#263a3d]",
+                ),
+                class_name="rounded-lg border border-[#e6e4d8] bg-[#fffefa] p-3",
+            ),
+        ),
+        class_name="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-3",
+    )
+
+
+def audit_explanation() -> rx.Component:
+    return rx.cond(
+        WorkspaceState.selected_audit["explanation"].length() > 0,
+        rx.el.div(
+            rx.el.h3(
+                "What this audit did",
+                class_name="font-['Lora'] text-lg font-medium text-[#263a3d]",
+            ),
+            rx.el.div(
+                rx.foreach(
+                    WorkspaceState.selected_audit["explanation"],
+                    lambda note: rx.el.div(
+                        rx.el.p(
+                            note["heading"],
+                            class_name="text-[11px] font-semibold text-[#5f7268]",
+                        ),
+                        rx.el.p(
+                            note["body"],
+                            class_name="mt-1 text-[11px] leading-relaxed text-[#69766e]",
+                        ),
+                        class_name="border-l-2 border-[#e0e5d8] py-1.5 pl-3",
+                    ),
+                ),
+                class_name="mt-3 flex flex-col gap-1",
+            ),
+            class_name="mt-4 rounded-xl border border-[#e6e4d8] bg-[#fffefa] p-4",
+        ),
     )
 
 
@@ -696,6 +1179,28 @@ def citation_audit_panel() -> rx.Component:
                         class_name="mt-3 rounded-lg bg-red-50 p-3 text-xs leading-relaxed text-red-700",
                     ),
                 ),
+                summary_cards(),
+                rx.cond(
+                    WorkspaceState.selected_audit["limits"].length() > 0,
+                    rx.el.div(
+                        rx.el.p(
+                            "Limits on this audit",
+                            class_name="mb-1 text-[9px] font-semibold tracking-[0.12em] text-[#889184]",
+                        ),
+                        rx.el.ul(
+                            rx.foreach(
+                                WorkspaceState.selected_audit["limits"],
+                                lambda limit: rx.el.li(
+                                    limit,
+                                    class_name="text-[11px] leading-relaxed text-[#8a8073]",
+                                ),
+                            ),
+                            class_name="flex flex-col gap-1",
+                        ),
+                        class_name="mt-4 rounded-lg border border-[#e3d6b4] bg-[#fbf6e8] p-3",
+                    ),
+                ),
+                audit_explanation(),
                 rx.cond(
                     WorkspaceState.selected_audit["issues"].length() > 0,
                     rx.el.div(
@@ -795,30 +1300,90 @@ def starter(text: str) -> rx.Component:
 
 
 def evidence_card(evidence: AnswerEvidence) -> rx.Component:
-    return rx.el.button(
+    location = rx.cond(
+        evidence["page"] > 0,
+        f"{evidence['section']} · page {evidence['page']}",
+        f"{evidence['section']} · page unavailable",
+    )
+    body = rx.el.div(
+        rx.el.p(
+            evidence["text"],
+            class_name="whitespace-pre-wrap break-words text-xs leading-relaxed text-[#46564f]",
+        ),
+        rx.el.p(
+            location,
+            class_name="mt-2 text-[10px] font-semibold tracking-wide text-[#718078]",
+        ),
+    )
+    return rx.cond(
+        evidence["passage_id"] != "",
+        rx.el.button(
+            rx.el.div(
+                rx.icon(
+                    rx.match(
+                        evidence["kind"],
+                        ("image", "image"),
+                        ("reference", "quote"),
+                        "quote",
+                    ),
+                    class_name="mt-0.5 h-4 w-4 shrink-0 text-[#bc7567]",
+                ),
+                body,
+                class_name="flex gap-3 text-left",
+            ),
+            on_click=WorkspaceState.select_passage(evidence["passage_id"]),
+            aria_label="Open this evidence in the paper reader",
+            class_name="w-full rounded-xl border border-[#e2e7dc] bg-[#fffefa] p-4 text-left transition-colors hover:border-[#9eafa0] hover:bg-[#f8faf5] focus-visible:outline-2 focus-visible:outline-[#215b56]",
+        ),
         rx.el.div(
-            rx.icon(
-                "quote", class_name="mt-0.5 h-4 w-4 shrink-0 text-[#bc7567]"
+            rx.el.p(
+                evidence["detail"],
+                class_name="mb-2 w-fit rounded-md bg-[#f1f1e8] px-2 py-1 text-[10px] text-[#7d8477]",
+            ),
+            body,
+            class_name="w-full rounded-xl border border-[#e2e7dc] bg-[#fafbf5] p-4",
+        ),
+    )
+
+
+def evidence_section() -> rx.Component:
+    """Expandable evidence list shown under the composed answer."""
+    return rx.cond(
+        WorkspaceState.answer_evidence.length() > 0,
+        rx.el.details(
+            rx.el.summary(
+                rx.el.div(
+                    rx.icon(
+                        "chevron-down",
+                        class_name="h-3.5 w-3.5 text-[#7e887e] transition-transform group-open:rotate-180",
+                    ),
+                    rx.el.span(
+                        "Show the supporting evidence",
+                        class_name="text-xs font-semibold text-[#315e54]",
+                    ),
+                    rx.el.span(
+                        f"({WorkspaceState.answer_evidence.length()} item(s))",
+                        class_name="text-[11px] font-normal text-[#87917f]",
+                    ),
+                    class_name="flex cursor-pointer list-none items-center gap-2",
+                ),
             ),
             rx.el.div(
-                rx.el.p(
-                    evidence["text"],
-                    class_name="whitespace-pre-wrap break-words text-xs leading-relaxed text-[#46564f]",
-                ),
-                rx.el.p(
-                    rx.cond(
-                        evidence["page"] > 0,
-                        f"{evidence['section']} · page {evidence['page']}",
-                        f"{evidence['section']} · page unavailable",
-                    ),
-                    class_name="mt-2 text-[10px] font-semibold tracking-wide text-[#718078]",
-                ),
+                rx.foreach(WorkspaceState.answer_evidence, evidence_card),
+                class_name="mt-3 flex flex-col gap-2",
             ),
-            class_name="flex gap-3 text-left",
+            rx.el.p(
+                "These are the exact excerpts the answer was checked against. "
+                "Passage evidence opens in the reader; reference and figure "
+                "evidence is shown as supplied.",
+                class_name="mt-2 text-[10px] leading-relaxed text-[#87917f]",
+            ),
+            class_name="group mt-5 border-t border-[#e6e9df] pt-4",
         ),
-        on_click=WorkspaceState.select_passage(evidence["passage_id"]),
-        aria_label="Open this quoted passage in the paper reader",
-        class_name="w-full rounded-xl border border-[#e2e7dc] bg-[#fffefa] p-4 text-left transition-colors hover:border-[#9eafa0] hover:bg-[#f8faf5] focus-visible:outline-2 focus-visible:outline-[#215b56]",
+        rx.el.p(
+            "The available paper text does not establish this. No supporting evidence is shown.",
+            class_name="mt-3 text-xs leading-relaxed text-[#7c8579]",
+        ),
     )
 
 
@@ -925,6 +1490,257 @@ def answer_settings() -> rx.Component:
     )
 
 
+def answer_meta() -> rx.Component:
+    """Confidence, limitations, and a source summary shown with an answer."""
+    return rx.cond(
+        WorkspaceState.answer_confidence != "",
+        rx.el.div(
+            rx.el.div(
+                rx.el.span(
+                    "CONFIDENCE",
+                    class_name="text-[9px] font-semibold tracking-[0.12em] text-[#889184]",
+                ),
+                rx.el.span(
+                    WorkspaceState.answer_confidence,
+                    class_name=rx.cond(
+                        WorkspaceState.answer_confidence == "high",
+                        "w-fit rounded-md bg-[#e6f0e4] px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-[#3f6b4c]",
+                        rx.cond(
+                            WorkspaceState.answer_confidence == "medium",
+                            "w-fit rounded-md bg-[#f7e9e3] px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-[#9d6257]",
+                            "w-fit rounded-md bg-[#f1f1e8] px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-[#7d8477]",
+                        ),
+                    ),
+                ),
+                rx.el.span(
+                    f"From {WorkspaceState.answer_evidence.length()} supporting passage(s) in this paper",
+                    class_name="text-[11px] text-[#7c8579]",
+                ),
+                class_name="flex flex-wrap items-center gap-3",
+            ),
+            rx.el.ul(
+                rx.foreach(
+                    WorkspaceState.answer_limitations,
+                    lambda limitation: rx.el.li(
+                        rx.el.span(
+                            rx.icon(
+                                "triangle-alert",
+                                class_name="mt-0.5 h-3 w-3 shrink-0 text-[#bc7567]",
+                            ),
+                            limitation,
+                            class_name="flex gap-2 text-[11px] leading-relaxed text-[#69766e]",
+                        ),
+                    ),
+                ),
+                class_name="mt-2.5 flex flex-col gap-1.5",
+            ),
+            rx.el.ul(
+                rx.foreach(
+                    WorkspaceState.answer_unsupported_parts,
+                    lambda part: rx.el.li(
+                        rx.el.span(
+                            rx.icon(
+                                "circle-alert",
+                                class_name="mt-0.5 h-3 w-3 shrink-0 text-[#b98170]",
+                            ),
+                            f"Could not be grounded: {part}",
+                            class_name="flex gap-2 text-[11px] leading-relaxed text-[#8a8073]",
+                        ),
+                    ),
+                ),
+                class_name="mt-2 flex flex-col gap-1.5",
+            ),
+            class_name="mt-4 rounded-lg border border-[#e6e9df] bg-[#fbfcf8] p-3",
+        ),
+    )
+
+
+def source_row(source: SearchSource) -> rx.Component:
+    return rx.el.li(
+        rx.el.div(
+            rx.el.a(
+                source["title"],
+                href=source["url"],
+                target="_blank",
+                rel="noreferrer",
+                class_name="text-xs font-semibold text-[#315e54] underline-offset-2 hover:underline",
+            ),
+            rx.el.p(
+                f"{source['publisher']} · retrieved {source['retrieved_at']}",
+                class_name="mt-0.5 text-[10px] text-[#87917f]",
+            ),
+            rx.el.p(
+                f"Why included: {source['reason']}",
+                class_name="mt-1 text-[10px] leading-relaxed text-[#87917f]",
+            ),
+            rx.el.p(
+                rx.cond(
+                    source["excerpt"] != "",
+                    source["excerpt"],
+                    "No excerpt was returned for this source.",
+                ),
+                class_name="mt-1.5 rounded-md bg-[#fafbf5] p-2 text-[11px] leading-relaxed text-[#5f6c64]",
+            ),
+            rx.el.span(
+                "Search excerpt, not a page Paperproof read",
+                class_name="mt-1.5 inline-block rounded-md bg-[#f7e9e3] px-2 py-1 text-[10px] text-[#9d6257]",
+            ),
+            class_name="rounded-lg border border-[#e6e4d8] bg-[#fffefa] p-3",
+        ),
+        class_name="list-none",
+    )
+
+
+def external_section() -> rx.Component:
+    """External context, kept strictly separate from the grounded answer."""
+    return rx.cond(
+        WorkspaceState.answer_search_status != "not_requested",
+        rx.el.div(
+            rx.el.div(
+                rx.icon(
+                    "globe", class_name="h-4 w-4 text-[#bc7567]"
+                ),
+                rx.el.h3(
+                    "External context",
+                    class_name="font-['Lora'] text-lg font-medium text-[#263a3d]",
+                ),
+                rx.el.span(
+                    "NOT FROM THIS PAPER",
+                    class_name="rounded-md bg-[#f7e9e3] px-2 py-1 text-[10px] font-semibold text-[#9d6257]",
+                ),
+                class_name="flex flex-wrap items-center gap-2",
+            ),
+            rx.el.p(
+                "The answer above comes only from this paper. Anything below "
+                "was found on the web and has not been checked against the "
+                "paper.",
+                class_name="mt-2 text-[11px] leading-relaxed text-[#7d887c]",
+            ),
+            rx.el.p(
+                WorkspaceState.answer_external_context,
+                class_name="mt-3 whitespace-pre-wrap text-sm leading-relaxed text-[#43524d]",
+            ),
+            rx.el.p(
+                WorkspaceState.answer_search_note,
+                role="status",
+                class_name="mt-3 rounded-lg bg-[#fbf7ed] p-3 text-[11px] leading-relaxed text-[#7b756a]",
+            ),
+            rx.cond(
+                WorkspaceState.answer_sources.length() > 0,
+                rx.el.div(
+                    rx.el.p(
+                        "SOURCES",
+                        class_name="mt-4 mb-2 text-[9px] font-semibold tracking-[0.12em] text-[#889184]",
+                    ),
+                    rx.el.ul(
+                        rx.foreach(WorkspaceState.answer_sources, source_row),
+                        class_name="flex flex-col gap-2",
+                    ),
+                ),
+            ),
+            rx.el.p(
+                "Search excerpts and metadata only. Open each source before "
+                "relying on it.",
+                class_name="mt-3 text-[10px] leading-relaxed text-[#87917f]",
+            ),
+            class_name="mt-5 border-t border-[#e6e9df] pt-4",
+        ),
+    )
+
+
+def external_toggle() -> rx.Component:
+    """Explicit opt-in, off by default, with the cost stated up front."""
+    return rx.el.div(
+        rx.el.label(
+            rx.el.input(
+                type="checkbox",
+                checked=WorkspaceState.external_enabled,
+                on_change=WorkspaceState.toggle_external,
+                disabled=WorkspaceState.answer_loading,
+                class_name="h-4 w-4 shrink-0 accent-[#215b56]",
+            ),
+            rx.el.div(
+                rx.el.span(
+                    "Include external context",
+                    class_name="text-xs font-semibold text-[#31453c]",
+                ),
+                rx.el.p(
+                    "Off by default. When on, your question and a short summary "
+                    "of the paper's evidence are sent to an external search "
+                    "provider, which may cost extra. Results are shown "
+                    "separately and are never treated as what this paper says.",
+                    class_name="mt-1 text-[10px] leading-relaxed text-[#87917f]",
+                ),
+                class_name="min-w-0",
+            ),
+            class_name="mt-3 flex cursor-pointer items-start gap-2.5 rounded-lg border border-[#e4e8dc] bg-[#fafbf5] p-3",
+        ),
+        class_name="mt-4",
+    )
+
+
+def capabilities_panel() -> rx.Component:
+    """What the configured models can and cannot do right now."""
+    return rx.el.details(
+        rx.el.summary(
+            rx.el.div(
+                rx.icon(
+                    "chevron-down",
+                    class_name="h-3.5 w-3.5 text-[#7e887e] transition-transform group-open:rotate-180",
+                ),
+                rx.el.span(
+                    "Model capabilities",
+                    class_name="text-xs font-semibold text-[#31453c]",
+                ),
+                class_name="flex cursor-pointer list-none items-center gap-2",
+            ),
+        ),
+        rx.el.ul(
+            rx.foreach(
+                WorkspaceState.capability_report,
+                lambda check: rx.el.li(
+                    rx.el.div(
+                        rx.el.span(
+                            check["capability"].replace("_", " "),
+                            class_name="text-[11px] font-semibold text-[#5f7268]",
+                        ),
+                        rx.el.span(
+                            rx.el.span(
+                                rx.cond(
+                                    check["model"] != "",
+                                    check["model"],
+                                    "not configured",
+                                ),
+                                class_name="text-[11px] text-[#43524d]",
+                            ),
+                            rx.el.span(
+                                rx.cond(
+                                    check["available"],
+                                    "available",
+                                    "unavailable",
+                                ),
+                                class_name=rx.cond(
+                                    check["available"],
+                                    "ml-2 rounded-md bg-[#e6f0e4] px-2 py-0.5 text-[10px] font-semibold text-[#3f6b4c]",
+                                    "ml-2 rounded-md bg-[#f7e9e3] px-2 py-0.5 text-[10px] font-semibold text-[#9d6257]",
+                                ),
+                            ),
+                            class_name="mt-1 flex flex-wrap items-center gap-1",
+                        ),
+                        rx.el.p(
+                            check["detail"],
+                            class_name="mt-1 text-[10px] leading-relaxed text-[#87917f]",
+                        ),
+                    ),
+                    class_name="border-b border-[#e8e7dc] py-2 last:border-0",
+                ),
+            ),
+            class_name="mt-2 flex flex-col",
+        ),
+        class_name="group mt-3 border-t border-[#e4e8dc] pt-3",
+    )
+
+
 def question_panel() -> rx.Component:
     return rx.el.section(
         rx.el.div(
@@ -945,7 +1761,9 @@ def question_panel() -> rx.Component:
             class_name="flex flex-wrap items-center justify-between gap-3",
         ),
         rx.el.p(
-            "Ask about this paper and get a concise answer with passages you can verify in the reader.",
+            "Ask about this paper and get a concise answer you can verify. "
+            "Questions about the paper's text, its figures, and its reference "
+            "list are routed to the right evidence automatically.",
             class_name="mt-2 text-xs leading-relaxed text-[#788275]",
         ),
         rx.el.form(
@@ -986,6 +1804,7 @@ def question_panel() -> rx.Component:
                 ),
                 class_name="mt-2 flex flex-wrap items-center justify-between gap-3",
             ),
+            external_toggle(),
             on_submit=WorkspaceState.save_question,
         ),
         rx.el.div(
@@ -996,6 +1815,7 @@ def question_panel() -> rx.Component:
             starter("What is the main finding?"),
             starter("How was the study designed?"),
             starter("What are the limitations?"),
+            starter("Which references are never cited?"),
             class_name="mt-5 flex flex-wrap items-center gap-2",
         ),
         rx.cond(
@@ -1049,30 +1869,14 @@ def question_panel() -> rx.Component:
                     WorkspaceState.answer,
                     class_name="whitespace-pre-wrap text-sm leading-relaxed text-[#43524d]",
                 ),
-                rx.cond(
-                    WorkspaceState.answer_evidence.length() > 0,
-                    rx.el.div(
-                        rx.el.p(
-                            "SUPPORTING PASSAGES · CLICK TO OPEN IN THE READER",
-                            class_name="mb-2 text-[9px] font-semibold tracking-[0.12em] text-[#889184]",
-                        ),
-                        rx.el.div(
-                            rx.foreach(
-                                WorkspaceState.answer_evidence, evidence_card
-                            ),
-                            class_name="flex flex-col gap-2",
-                        ),
-                        class_name="mt-5 border-t border-[#e6e9df] pt-4",
-                    ),
-                    rx.el.p(
-                        "The available paper text does not establish this. No supporting evidence is shown.",
-                        class_name="mt-3 text-xs leading-relaxed text-[#7c8579]",
-                    ),
-                ),
+                answer_meta(),
+                external_section(),
+                evidence_section(),
                 class_name="mt-4 rounded-xl border border-[#dfe5d7] bg-[#f8faf5] p-4 md:p-5",
             ),
         ),
         answer_settings(),
+        capabilities_panel(),
         class_name="mt-5 rounded-2xl border border-[#dfe5d7] bg-[#f4f7ee] p-5 md:p-6",
     )
 
