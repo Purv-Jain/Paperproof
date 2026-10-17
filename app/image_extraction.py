@@ -39,6 +39,13 @@ MIN_IMAGE_DIMENSION = 80
 MIN_IMAGE_OCR_PIXELS = 20_000
 SURROUNDING_TEXT_LIMIT = 600
 
+# An embedded object that appears on this many or more distinct pages is page
+# furniture, not a figure. Publisher templates (for example an IEEE two-column
+# layout) split background artwork into strips and composite the same set onto
+# every page; showing those tiles as "figures" buries the real ones. A genuine
+# figure belongs to the page it is printed on.
+MAX_PAGES_PER_FIGURE = 2
+
 Severity = Literal["info", "warning", "error"]
 
 
@@ -416,6 +423,7 @@ def extract_pdf_images(
     seen_xrefs: set[int] = set()
     total_bytes = 0
     truncated = False
+    recurring: set[int] = set()
     try:
         document = pymupdf.open(stream=data, filetype="pdf")
     except Exception as e:
@@ -429,6 +437,17 @@ def extract_pdf_images(
                 "Text analysis still works. Open the PDF directly to view figures.",
             )
         ]
+    # Counted before extraction so a background strip composited onto every
+    # page can be recognised and skipped rather than presented as a figure.
+    page_occurrences: dict[int, int] = {}
+    for page in document:
+        for info in page.get_images(full=True):
+            xref = info[0]
+            page_occurrences[xref] = page_occurrences.get(xref, 0) + 1
+    recurring = {
+        xref for xref, count in page_occurrences.items()
+        if count > MAX_PAGES_PER_FIGURE
+    }
     try:
         for page_number, page in enumerate(document, start=1):
             lines = _page_text_lines(page)
@@ -437,6 +456,8 @@ def extract_pdf_images(
                     truncated = True
                     break
                 xref = info[0]
+                if xref in recurring:
+                    continue
                 if xref in seen_xrefs:
                     # The same embedded object reused on another page is one
                     # figure, not two.
@@ -496,6 +517,21 @@ def extract_pdf_images(
                 break
     finally:
         document.close()
+    if recurring:
+        warnings.append(
+            warning(
+                "page_furniture_skipped",
+                "Figures and images",
+                "info",
+                (
+                    f"{len(recurring)} repeating background or template images "
+                    "were left out because they are drawn on more than "
+                    f"{MAX_PAGES_PER_FIGURE} pages."
+                ),
+                "Those are page artwork rather than figures, and including them "
+                "would push the real figures out of view.",
+            )
+        )
     if truncated:
         warnings.append(
             warning(

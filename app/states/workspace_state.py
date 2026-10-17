@@ -30,6 +30,7 @@ from app.model_config import (
     CapabilityCheck,
     check_all,
     check_capability,
+    effective_model,
     resolve_model,
     supports_parameter,
 )
@@ -574,15 +575,21 @@ def reference_evidence(paper: Paper, citation_ids: list[str]) -> list[AnswerEvid
         if reference is None:
             continue
         entry = " ".join(reference["text"].split())
+        number = reference_number(paper, reference["id"])
         cards.append(
             AnswerEvidence(
                 id=reference["id"],
                 passage_id="",
-                section="References",
+                section=f"References · entry {number}" if number else "References",
                 page=0,
                 text=entry,
                 kind="reference",
-                detail=f"Bibliography entry as supplied ({reference['id']})",
+                detail=(
+                    f"Bibliography entry [{number}] as supplied — the same row "
+                    f"shown in the References tab"
+                    if number
+                    else f"Bibliography entry as supplied ({reference['id']})"
+                ),
             )
         )
     return cards
@@ -849,6 +856,20 @@ def citation_bearing_passages(
     return found
 
 
+def reference_number(paper: Paper, reference_id: str) -> str:
+    """1-based position of a bibliography entry, as shown in the References tab.
+
+    The number is derived from the entry's real position in the parsed list
+    rather than from its id, so it always matches what the reader sees and
+    cannot drift from the order on screen.
+    """
+    wanted = _normalize_citation_id(reference_id)
+    for index, reference in enumerate(paper.get("references", []) or [], start=1):
+        if _normalize_citation_id(reference["id"]) == wanted:
+            return str(index)
+    return ""
+
+
 def build_answer_context(
     paper: Paper,
     intent: QuestionIntent,
@@ -885,11 +906,19 @@ def build_answer_context(
     ]
     if intent["references"]:
         for reference in (paper.get("references", []) or [])[:limit]:
+            number = reference_number(paper, reference["id"])
             context.append(
                 {
                     "kind": "reference",
                     "id": reference["id"],
-                    "label": "Bibliography entry, exactly as supplied",
+                    # The bracketed number is the same one the References tab
+                    # shows, so a number in the answer points at a row the
+                    # reader can actually go and look at.
+                    "label": (
+                        f"[{number}] Bibliography entry, exactly as supplied"
+                        if number
+                        else "Bibliography entry, exactly as supplied"
+                    ),
                     "text": " ".join(reference["text"].split()),
                 }
             )
@@ -985,7 +1014,9 @@ def _call_openrouter(
     if context:
         context_text = _format_context(context)
     # Model selection is configuration, resolved once, never chosen per call.
-    model = resolve_model("text")
+    # `effective_model` rolls to a verified backup when the configured free
+    # model has been withdrawn, so one dead slug cannot end every answer.
+    model = effective_model("text")
     payload = {
         "model": model,
         "messages": [
@@ -1000,7 +1031,11 @@ def _call_openrouter(
                     "Preserve the source's qualifiers, uncertainty, study population, scope, "
                     "and limitations; do not turn associations into causal claims. "
                     "Include in evidence_ids every passage supporting your claims, using only "
-                    "its exact supplied ID. For an abstract question, cite an actual Abstract, "
+                    "its exact supplied ID. When a claim rests on a bibliography entry, also "
+                    "write its bracketed number in the answer text, for example \"[3]\", "
+                    "using the number shown in that entry's label; do not invent a number, "
+                    "and use no number when no entry supports the claim. For an abstract "
+                    "question, cite an actual Abstract, "
                     "Summary, or Synopsis passage when supplied. Do not invent information, "
                     "facts, references, page numbers, or quotations. No verbatim restatement "
                     "or extractive quotation: synthesize rather than copy source sentences. "
@@ -1195,7 +1230,7 @@ def _call_openrouter_search(
             "External context is unavailable because no answer service is "
             "configured. The paper-only answer above is unaffected."
         )
-    model = resolve_model("web_search")
+    model = effective_model("web_search")
     if not model:
         raise SearchUnavailable(
             "No model is configured for web search, so external context is "
@@ -1543,7 +1578,40 @@ class WorkspaceState(rx.State):
 
     @rx.var
     def selected_extraction_warnings(self) -> list[ExtractionWarning]:
-        return paper_extraction_warnings(self.selected_paper)
+        """Extraction notes worth showing under the reader.
+
+        When a paper has no figures, the figures section states that plainly
+        and, if page artwork was the reason, says how much was skipped. Keeping
+        the equivalent notes here as well just repeated the same sentence in a
+        second bordered box, so they are dropped when the figures section
+        already carries the explanation. Warnings about anything else — OCR,
+        oversized figures, extraction failures — are always kept, because the
+        figures section does not speak to those.
+        """
+        warnings = paper_extraction_warnings(self.selected_paper)
+        if paper_images(self.selected_paper):
+            return warnings
+        return [
+            warning
+            for warning in warnings
+            if warning.get("code")
+            not in {"no_images_found", "page_furniture_skipped"}
+        ]
+
+    @rx.var
+    def skipped_page_furniture(self) -> int:
+        """How many repeating page-artwork images were left out of the figures.
+
+        Shown in the figures section so a reader knows the absence is a
+        deliberate decision about a template's background rather than a failed
+        extraction.
+        """
+        for warning in paper_extraction_warnings(self.selected_paper):
+            if warning.get("code") == "page_furniture_skipped":
+                match = re.match(r"^(\d+)", warning.get("message", ""))
+                if match:
+                    return int(match.group(1))
+        return 0
 
     @rx.var
     def selected_section_count(self) -> int:
@@ -1742,7 +1810,7 @@ class WorkspaceState(rx.State):
         )
         try:
             retrieved = _retrieve_passages(passages, text)
-            answer_answer_context = build_answer_context(
+            answer_context = build_answer_context(
                 paper, intent, retrieved, question=text
             )
             # A question about references or figures can be answered even when
@@ -1942,8 +2010,17 @@ class WorkspaceState(rx.State):
         self._sweep_session_media()
 
 
+def _walk_symtable(table):
+    """Yield a symbol table and every scope nested inside it."""
+    yield table
+    for child in table.get_children():
+        yield from _walk_symtable(child)
+
+
 if __name__ == "__main__":
     import ast
+    import sys
+
     from io import BytesIO
     from pathlib import Path
     import unittest
@@ -2253,6 +2330,165 @@ if __name__ == "__main__":
                     for node in ast.walk(handler)
                 )
             )
+
+        def test_save_question_reads_only_names_it_binds(self):
+            # A read of a name the handler never assigns raises NameError at
+            # request time, and the broad handler below turns that into a
+            # generic "couldn't generate a grounded answer" message. Assert the
+            # binding directly so a typo cannot hide behind that catch-all.
+            import symtable
+
+            source = Path(__file__).read_text()
+            scopes = symtable.symtable(source, "workspace_state.py", "exec")
+            table = next(
+                scope
+                for scope in _walk_symtable(scopes)
+                if scope.get_type() == "function"
+                and scope.get_name() == "save_question"
+            )
+            module_names = {name for name in scopes.get_identifiers()}
+            module_names |= set(dir(__builtins__)) if isinstance(
+                __builtins__, dict
+            ) else set(dir(__builtins__))
+            unbound = sorted(
+                name
+                for name in table.get_identifiers()
+                if table.lookup(name).is_referenced()
+                and not table.lookup(name).is_assigned()
+                and not table.lookup(name).is_parameter()
+                and not table.lookup(name).is_imported()
+                and name not in module_names
+            )
+            self.assertEqual(unbound, [])
+
+        def test_asking_a_question_reaches_the_model_and_grounds_the_answer(self):
+            # The helper-level tests above all bypassed the assembled handler,
+            # so a handler-only fault reached production untouched. Drive the
+            # real `save_question` end to end against a stubbed provider.
+            import asyncio
+
+            ws_module = sys.modules[__name__]
+            paper = get_sample_papers()[0]
+            supplied: dict[str, Any] = {}
+
+            def fake_provider(question, passages, *, context=None, **kwargs):
+                supplied["ids"] = [item["id"] for item in (context or [])]
+                return _validate_answer_payload(
+                    {
+                        "answer": "The exercise group improved memory scores.",
+                        "evidence_ids": supplied["ids"][:1],
+                        "confidence": "high",
+                        "limitations": ["Small convenience sample."],
+                        "unsupported_parts": [],
+                    }
+                )
+
+            class Stub:
+                """save_question only reads vars and commits under `async with self`."""
+
+                def __init__(self):
+                    self.selected_id = paper["id"]
+                    self.papers = [paper]
+                    self.selected_paper = paper
+                    self.answer_loading = False
+                    self.answer_request_id = 0
+                    self.external_enabled = False
+                    self.temperature = 0.3
+                    self.top_p = 1.0
+                    self.top_k = 0
+                    self.frequency_penalty = 0.0
+                    self.presence_penalty = 0.0
+                    self.answer = ""
+                    self.answer_evidence = []
+                    self.answer_confidence = ""
+                    self.answer_limitations = []
+                    self.answer_unsupported_parts = []
+                    self.answer_external_context = ""
+                    self.answer_sources = []
+                    self.answer_search_status = ""
+                    self.answer_search_note = ""
+                    self.answer_error_message = ""
+                    self._clear_answer = lambda: None
+
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, *exc):
+                    return False
+
+            async def ask(question: str):
+                supplied.clear()
+                state = Stub()
+                handler = WorkspaceState.save_question.fn
+                generator = handler(state, {"question": question})
+                with patch.dict(
+                    os.environ, {"OPENROUTER_API_KEY": "test-key"}
+                ), patch.object(ws_module, "_call_openrouter", fake_provider):
+                    await anext(generator)
+                    try:
+                        await anext(generator)
+                        await anext(generator)
+                    except StopAsyncIteration:
+                        pass
+                return state
+
+            for question in (
+                "What is the main finding from the abstract?",
+                "How was the study designed?",
+            ):
+                with self.subTest(question=question):
+                    state = asyncio.run(ask(question))
+                    # Any handler fault surfaces as this generic message.
+                    self.assertEqual(state.answer_error_message, "")
+                    self.assertTrue(supplied.get("ids"), "provider was not called")
+                    self.assertEqual(state.answer_loading, False)
+                    self.assertTrue(state.answer)
+                    self.assertEqual(len(state.answer_evidence), 1)
+                    self.assertEqual(state.answer_confidence, "high")
+
+            # No retrievable evidence must produce the honest refusal without
+            # spending a call, never the generic failure message.
+            state = asyncio.run(ask("What limitations did the authors report?"))
+            self.assertEqual(state.answer_error_message, "")
+            self.assertEqual(supplied.get("ids"), None)
+            self.assertEqual(state.answer_evidence, [])
+            self.assertIn("does not establish an answer", state.answer)
+            self.assertEqual(state.answer_loading, False)
+
+        def test_reference_numbers_match_the_order_shown_to_the_reader(self):
+            # A number in an answer is only useful if it points at the same row
+            # the References tab renders, so it must come from list position.
+            paper = get_sample_papers()[0]
+            references = paper["references"]
+            self.assertTrue(references)
+            for index, reference in enumerate(references, start=1):
+                self.assertEqual(reference_number(paper, reference["id"]), str(index))
+            self.assertEqual(reference_number(paper, "not-a-reference"), "")
+
+        def test_reference_context_and_cards_carry_that_number(self):
+            paper = get_sample_papers()[0]
+            question = "Which references are never cited?"
+            intent = route_question(question)
+            context = build_answer_context(
+                paper, intent, [], question=question
+            )
+            labels = [
+                item["label"]
+                for item in context
+                if item["kind"] == "reference"
+            ]
+            self.assertTrue(labels)
+            for label in labels:
+                self.assertRegex(label, r"^\[\d+\] Bibliography entry")
+            # The number in the context must be the one on the matching card.
+            first = next(
+                item for item in context if item["kind"] == "reference"
+            )
+            cards = reference_evidence(paper, [first["id"]])
+            self.assertEqual(len(cards), 1)
+            number = first["label"].split("]")[0].lstrip("[")
+            self.assertIn(f"entry {number}", cards[0]["section"])
+            self.assertIn(f"[{number}]", cards[0]["detail"])
 
         def test_answer_payload_requires_the_full_contract(self):
             valid = {

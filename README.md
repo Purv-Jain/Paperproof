@@ -286,6 +286,7 @@ Some suites include inline regression tests that run when executed directly (for
 | `test_session_cleanup` | Session figure sweeping, path-traversal safety, media isolation |
 | `test_logging_safety` | Credential redaction and failure logging |
 | `app.states.workspace_state` | Inline answer-grounding and retrieval regressions |
+| `test_crossref_lookup.py` | The live web-reference path: DOI extraction, metadata agreement, retry/backoff, honest failure states. Two opt-in live tests (`PAPERPROOF_LIVE_CROSSREF=1`) |
 
 `test_integration.py` drives the real pipeline in the order the application runs it — validate, classify, extract, route, retrieve, build context, call the model at the HTTP boundary, ground the answer, audit — and stubs only `requests`. A break anywhere between two steps fails a test.
 
@@ -343,8 +344,12 @@ PaperProof/
 ### How the audit works
 1. `run_citation_audit` partitions body text from bibliography entries.
 2. `_build_issues` extracts author–year citations, cross-checks them against references, and flags duplicates, missing entries, uncited references, year conflicts, out-of-range citation numbers, and formatting gaps — each with a severity.
-3. `_verify_reference` queries Crossref by DOI or bibliographic search, with retry, backoff, and a capped request rate, recording method, matched fields, conflicts, uncertainty, and a timestamp. One failed lookup can never abort the audit.
+3. `_verify_reference` queries **Crossref** by DOI or bibliographic search, with retry, backoff, and a capped request rate. When Crossref has no record — or is unreachable — it falls back to **OpenAlex**, which needs no key and covers far more (preprints, books, theses) because Crossref indexes only DOI-registered works. Each resolver's records are normalized to one shape so both are judged by identical title/author/year rules. `lookup_method` names the resolver that answered, and one failed lookup can never abort the audit.
 4. `limits` states every reason the audit is partial; `explanation` renders the result in plain language; `_correction_prompt` builds the copyable, severity-grouped prompt with explicit prohibitions on inventing detail.
+
+Three honesty rules are enforced: "not found" names **both** registries and keeps its *"this does not prove the work does not exist"* caveat; a resolver **outage** is never reported as a missing reference; and a confirmation obtained while Crossref was down discloses that in the message.
+
+This verifies that a **reference** is real and matches its metadata. It does **not** check whether a **claim** attributed to that reference is accurate — see `UPGRADE-ROADMAP.md` §9.
 
 ---
 
@@ -353,7 +358,7 @@ PaperProof/
 - Extraction is heuristic: equations, complex tables, footnotes, and text boxes may not be preserved.
 - Bracketed numeric citation styles are detected and reported, not fully mapped. Paperproof says so and withholds the checks it cannot support rather than reporting invented uncited references.
 - Crossref verification is capped at 15 references per audit to keep public API requests bounded.
-- Confirmed metadata is supporting evidence only and does not prove a citation's claim is correct.
+- Confirmed metadata is supporting evidence only and does not prove a citation's claim is correct. The audit verifies that a **reference** is real and matches its metadata; it does not check that the **claim** drawn from it is accurate.
 - The audit does not prove a work exists or does not exist; unresolved results require manual review.
 - Figure reading is local. A figure whose meaning lives only in its pixels — a plotted curve with no caption or nearby explanation — cannot be interpreted, by design.
 

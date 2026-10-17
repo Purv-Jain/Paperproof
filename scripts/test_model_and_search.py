@@ -4,9 +4,11 @@ from unittest.mock import Mock, patch
 
 from app.model_config import (
     DEFAULT_MODEL,
+    FALLBACK_MODELS,
     ROUTER_MODEL,
     check_all,
     check_capability,
+    effective_model,
     resolve_model,
     supports_parameter,
 )
@@ -99,9 +101,109 @@ class ModelConfigTests(unittest.TestCase):
 
     def test_free_router_is_not_claimed_as_verified(self):
         with patch.dict(os.environ, {"OPENROUTER_WEB_SEARCH_MODEL": ROUTER_MODEL}):
-            check = check_capability("web_search")
+            # Pinned so the assertion tests the router branch rather than
+            # whatever the live model list happens to be doing right now.
+            with patch(
+                "app.model_config.model_index",
+                return_value=({DEFAULT_MODEL: {"id": DEFAULT_MODEL}}, ""),
+            ):
+                check = check_capability("web_search")
         self.assertTrue(check["available"])
         self.assertIn("cannot be verified in advance", check["detail"])
+
+    def test_withdrawn_model_rolls_to_the_first_verified_backup(self):
+        # The configured model is gone; the first backup is gone too, so the
+        # walk must continue to the one the index can actually confirm.
+        os.environ["OPENROUTER_TEXT_MODEL"] = "vendor/withdrawn"
+        index = {
+            "vendor/backup-two": {
+                "id": "vendor/backup-two",
+                "supported_parameters": ["temperature", "structured_outputs"],
+                "architecture": {"input_modalities": ["text"]},
+            },
+            "vendor/backup-three": {"id": "vendor/backup-three"},
+        }
+        with patch(
+            "app.model_config.FALLBACK_MODELS",
+            ("vendor/backup-one", "vendor/backup-two", "vendor/backup-three"),
+        ):
+            with patch("app.model_config.model_index", return_value=(index, "")):
+                self.assertEqual(effective_model("text"), "vendor/backup-two")
+
+    def test_withdrawn_default_model_rolls_to_a_real_backup(self):
+        # No environment override at all: the shipped default being withdrawn
+        # is the realistic production failure.
+        backups = (FALLBACK_MODELS[0],)
+        index = {
+            "vendor/unrelated": {"id": "vendor/unrelated"},
+            backups[0]: {"id": backups[0]},
+        }
+        with patch("app.model_config.FALLBACK_MODELS", backups):
+            with patch("app.model_config.model_index", return_value=(index, "")):
+                self.assertEqual(effective_model("text"), backups[0])
+
+    def test_available_configured_model_is_never_swapped(self):
+        index = {
+            DEFAULT_MODEL: {"id": DEFAULT_MODEL},
+            FALLBACK_MODELS[0]: {"id": FALLBACK_MODELS[0]},
+        }
+        with patch("app.model_config.model_index", return_value=(index, "")):
+            self.assertEqual(effective_model("text"), DEFAULT_MODEL)
+
+    def test_failed_lookup_does_not_trigger_a_swap(self):
+        # An empty index means the model list could not be fetched. Swapping on
+        # no evidence would be a guess, so the configured model is kept.
+        with patch("app.model_config.model_index", return_value=({}, "offline")):
+            self.assertEqual(effective_model("text"), DEFAULT_MODEL)
+
+    def test_no_verified_backup_keeps_the_configured_model(self):
+        # Returning the configured model keeps the request failing with
+        # OpenRouter's real error rather than a confusing wrong-model error.
+        index = {"vendor/unrelated": {"id": "vendor/unrelated"}}
+        os.environ["OPENROUTER_TEXT_MODEL"] = "vendor/withdrawn"
+        with patch("app.model_config.model_index", return_value=(index, "")):
+            self.assertEqual(effective_model("text"), "vendor/withdrawn")
+
+    def test_web_search_fallback_skips_models_without_tool_support(self):
+        # A text-only backup would break the search request, so it must not be
+        # handed to the web_search capability.
+        index = {
+            FALLBACK_MODELS[0]: {
+                "id": FALLBACK_MODELS[0],
+                "supported_parameters": ["temperature"],
+                "architecture": {"input_modalities": ["text"]},
+            },
+            FALLBACK_MODELS[1]: {
+                "id": FALLBACK_MODELS[1],
+                "supported_parameters": ["temperature", "tools"],
+                "architecture": {"input_modalities": ["text"]},
+            },
+        }
+        os.environ["OPENROUTER_WEB_SEARCH_MODEL"] = "vendor/withdrawn"
+        with patch("app.model_config.model_index", return_value=(index, "")):
+            self.assertEqual(effective_model("web_search"), FALLBACK_MODELS[1])
+
+    def test_capability_check_names_the_model_actually_used(self):
+        # Paperproof must not switch silently: the reported model is the one
+        # the request will really call.
+        index = {
+            FALLBACK_MODELS[0]: {
+                "id": FALLBACK_MODELS[0],
+                "supported_parameters": ["temperature"],
+                "architecture": {"input_modalities": ["text"]},
+            },
+        }
+        os.environ["OPENROUTER_TEXT_MODEL"] = "vendor/withdrawn"
+        with patch("app.model_config.model_index", return_value=(index, "")):
+            check = check_capability("text")
+        self.assertEqual(check["model"], FALLBACK_MODELS[0])
+        self.assertTrue(check["available"])
+
+    def test_router_is_left_alone_because_it_picks_per_request(self):
+        index = {FALLBACK_MODELS[0]: {"id": FALLBACK_MODELS[0]}}
+        os.environ["OPENROUTER_TEXT_MODEL"] = ROUTER_MODEL
+        with patch("app.model_config.model_index", return_value=(index, "")):
+            self.assertEqual(effective_model("text"), ROUTER_MODEL)
 
     def test_default_model_is_a_verified_free_model(self):
         self.assertEqual(resolve_model("text"), DEFAULT_MODEL)
@@ -116,7 +218,11 @@ class ModelConfigTests(unittest.TestCase):
                 "OPENROUTER_REFERENCE_MODEL": "openrouter/free",
             },
         ):
-            check = check_capability("text")
+            with patch(
+                "app.model_config.model_index",
+                return_value=({DEFAULT_MODEL: {"id": DEFAULT_MODEL}}, ""),
+            ):
+                check = check_capability("text")
         self.assertTrue(check["available"])
         self.assertIn("cannot be verified in advance", check["detail"])
 

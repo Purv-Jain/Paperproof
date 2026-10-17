@@ -138,6 +138,72 @@ def _supports(entry: dict, parameter: str) -> bool:
     return isinstance(parameters, list) and parameter in parameters
 
 
+def _supports_model(model: str, parameter: str) -> bool:
+    """Whether the index can confirm a model advertises a request parameter."""
+    index, _ = model_index()
+    entry = index.get(model)
+    return isinstance(entry, dict) and _supports(entry, parameter)
+
+
+def _fallback_candidates(capability: str) -> tuple[str, ...]:
+    """Fallback models usable for a capability.
+
+    Web search is filtered because a text-only backup would otherwise be handed
+    to a request that needs tools, turning a withdrawn model into a silent
+    feature break instead of an honest "search unavailable".
+    """
+    if capability != "web_search":
+        return FALLBACK_MODELS
+    return tuple(
+        model
+        for model in FALLBACK_MODELS
+        if _supports_model(model, "tools")
+        or _supports_model(model, "web_search_options")
+    )
+
+
+def effective_model(capability: str) -> str:
+    """Return the model to actually call, rolling over if it is unavailable.
+
+    ``resolve_model`` is a pure configuration lookup and stays that way. This
+    is the layer that notices the chosen free model has disappeared from
+    OpenRouter's list and moves to the next verified backup, because otherwise
+    every request fails until someone edits the environment.
+
+    Two rules keep this honest. The model list is only consulted when it was
+    actually fetched: an empty index means the lookup failed, and no switch is
+    made on that evidence, because an unverified configured model is better
+    than a confidently wrong swap. And when no backup qualifies, the
+    configured model is returned so the request fails with OpenRouter's real
+    error instead of a confusing wrong-model error.
+    """
+    configured = resolve_model(capability)
+    if not configured or configured == ROUTER_MODEL:
+        # The router picks a model per request, so there is nothing to verify.
+        return configured
+    index, _ = model_index()
+    if not index or configured in index:
+        return configured
+    for candidate in _fallback_candidates(capability):
+        if candidate in index:
+            logging.warning(
+                "Configured %s model %s is no longer in OpenRouter's model "
+                "list; using %s instead.",
+                capability,
+                configured,
+                candidate,
+            )
+            return candidate
+    logging.warning(
+        "Configured %s model %s is unavailable and no verified fallback "
+        "model could be found; keeping the configured model so the request "
+        "reports OpenRouter's own error.",
+        capability,
+        configured,
+    )
+    return configured
+
+
 def supports_parameter(model: str, parameter: str) -> bool:
     """Whether a configured model advertises a request parameter.
 
@@ -187,7 +253,7 @@ def check_capability(capability: str) -> CapabilityCheck:
                 "is not enabled, Paperproof falls back to OpenRouter."
             ),
         )
-    model = resolve_model(capability)
+    model = effective_model(capability)
     if not model:
         return CapabilityCheck(
             capability=capability,
@@ -261,6 +327,7 @@ __all__ = [
     "CapabilityCheck",
     "check_all",
     "check_capability",
+    "effective_model",
     "model_index",
     "resolve_model",
     "search_provider",

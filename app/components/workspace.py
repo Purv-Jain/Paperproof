@@ -556,23 +556,34 @@ def figures_panel() -> rx.Component:
                 ),
             ),
             rx.el.div(
-                rx.icon("image-off", class_name="mb-4 h-7 w-7 text-[#79917b]"),
+                rx.icon("image-off", class_name="mb-3 h-6 w-6 text-[#9aa597]"),
                 rx.el.h3(
-                    "No figures were extracted",
-                    class_name="font-['Lora'] text-xl text-[#263a3d]",
+                    "No figures in this paper",
+                    class_name="font-['Lora'] text-lg text-[#263a3d]",
                 ),
                 rx.el.p(
-                    "This paper has no embedded images Paperproof could read. "
-                    "Figures drawn as vector shapes, or a scanned paper whose "
-                    "pages are one large image, often cannot be separated this "
-                    "way. The paper text and the citation audit still work "
-                    "normally, and the figures remain visible in the source file.",
-                    class_name="mt-3 max-w-xl text-sm leading-relaxed text-[#7d887c]",
+                    rx.cond(
+                        WorkspaceState.skipped_page_furniture > 0,
+                        f"Paperproof skipped {WorkspaceState.skipped_page_furniture} repeating background or template image(s) that were drawn on most pages. Those are page artwork, not figures, so nothing is left to show here.",
+                        "This paper has no embedded images Paperproof could read. Figures drawn as vector shapes, or a scanned paper whose pages are one large image, often cannot be separated this way.",
+                    ),
+                    class_name="mt-2 max-w-2xl text-xs leading-relaxed text-[#7d887c]",
                 ),
-                class_name="py-6",
+                rx.el.p(
+                    "The paper text, grounded answers, and the citation audit all work normally. Any figures remain visible in the source file.",
+                    class_name="mt-2 max-w-2xl text-xs leading-relaxed text-[#9aa597]",
+                ),
+                class_name="py-2",
             ),
         ),
-        class_name="min-h-[330px] px-5 py-6 md:px-7",
+        # The tall minimum height exists so a short figure list does not make
+        # the card jump when navigating tabs. With nothing to show it just
+        # leaves an empty box, so the empty state is allowed to be compact.
+        class_name=rx.cond(
+            WorkspaceState.selected_images.length() > 0,
+            "min-h-[330px] px-5 py-6 md:px-7",
+            "px-5 py-6 md:px-7",
+        ),
     )
 
 
@@ -790,9 +801,7 @@ def paper_reader() -> rx.Component:
                     rx.el.div(
                         rx.el.h3(
                             rx.cond(
-                                WorkspaceState.selected_audit[
-                                    "references"
-                                ].length()
+                                WorkspaceState.selected_audit["references"].length()
                                 > 0,
                                 "Parsed references & Crossref status",
                                 "References as supplied",
@@ -801,32 +810,37 @@ def paper_reader() -> rx.Component:
                         ),
                         rx.el.p(
                             rx.cond(
-                                WorkspaceState.selected_audit[
-                                    "references"
-                                ].length()
+                                WorkspaceState.selected_audit["references"].length()
                                 > 0,
                                 "Parsed entries and verification results from the latest citation audit. Crossref results are not proof that a source does or does not exist.",
                                 "Reference entries as supplied. Run the citation audit below to compare in-text citations and check available Crossref metadata.",
                             ),
                             class_name="mt-2 text-xs leading-relaxed text-[#7d887c]",
                         ),
-                        rx.cond(
-                            WorkspaceState.selected_audit["references"].length()
-                            > 0,
-                            rx.el.ul(
-                                rx.foreach(
-                                    WorkspaceState.selected_audit["references"],
-                                    verification_row,
+                        rx.el.div(
+                            rx.cond(
+                                WorkspaceState.selected_audit["references"].length()
+                                > 0,
+                                rx.el.ul(
+                                    rx.foreach(
+                                        WorkspaceState.selected_audit["references"],
+                                        verification_row,
+                                    ),
+                                    class_name="divide-y divide-[#e8e7dc]",
                                 ),
-                                class_name="mt-2 divide-y divide-[#e8e7dc]",
-                            ),
-                            rx.el.ul(
-                                rx.foreach(
-                                    WorkspaceState.selected_paper["references"],
-                                    reference_row,
+                                rx.el.ul(
+                                    rx.foreach(
+                                        WorkspaceState.selected_paper["references"],
+                                        reference_row,
+                                    ),
                                 ),
-                                class_name="mt-2",
                             ),
+                            # A paper can carry hundreds of entries. Scoping the
+                            # scroll to this list keeps the tabs and the reader
+                            # reachable instead of pushing them off-screen.
+                            class_name="mt-2 max-h-[420px] overflow-y-auto "
+                            "overscroll-contain rounded-xl border border-[#eeede0] "
+                            "bg-[#fffefa] pr-1 md:max-h-[520px]",
                         ),
                     ),
                     rx.el.div(
@@ -1234,23 +1248,9 @@ def citation_audit_panel() -> rx.Component:
                 ),
                 rx.cond(
                     WorkspaceState.selected_audit["references"].length() > 0,
-                    rx.el.div(
-                        rx.el.h3(
-                            "Crossref reference checks",
-                            class_name="font-['Lora'] text-lg font-medium text-[#263a3d]",
-                        ),
-                        rx.el.p(
-                            "A confirmed match means the available metadata aligned; ambiguous, missing, and lookup-error results require manual checking.",
-                            class_name="mt-1 text-[11px] leading-relaxed text-[#788275]",
-                        ),
-                        rx.el.ul(
-                            rx.foreach(
-                                WorkspaceState.selected_audit["references"],
-                                verification_row,
-                            ),
-                            class_name="mt-3 divide-y divide-[#e8e7dc] rounded-xl border border-[#e6e4d8] bg-[#fffefa] px-4",
-                        ),
-                        class_name="mt-5",
+                    rx.el.p(
+                        "Reference-by-reference results are in the reader's References tab.",
+                        class_name="mt-5 text-[11px] leading-relaxed text-[#788275]",
                     ),
                 ),
                 rx.cond(

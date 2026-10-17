@@ -28,6 +28,18 @@ CROSSREF_MAX_ATTEMPTS = 3
 CROSSREF_MAX_RETRY_AFTER = 30.0
 CROSSREF_REQUEST_INTERVAL = 1.0
 
+# Second resolver. Crossref indexes DOI-registered works only, so a preprint,
+# book, thesis, or report returns "not found" there and becomes
+# indistinguishable from a fabricated reference. OpenAlex covers far more and,
+# unlike every other external service this project uses, requires no key and
+# no billing, so the fallback costs nothing.
+OPENALEX_URL = "https://api.openalex.org/works"
+# OpenAlex asks callers to send a contact address so they can be reached before
+# rate-limiting rather than silently blocked.
+OPENALEX_HEADERS = {
+    "User-Agent": "Paperproof/1.0 (citation audit; https://reflex.dev)"
+}
+
 
 class AuditIssue(TypedDict):
     category: str
@@ -441,7 +453,31 @@ def _reference_content_terms(text: str) -> set[str]:
     }
 
 
+# Numeric/IEEE entries put the article title in quotes and the year further
+# along, usually right before a trailing "doi:" label. Straight, curly and
+# low-9 quotes all occur in the wild, because the marks come from the PDF.
+_QUOTE_OPEN = "\u201c\u201f\u201e\""
+_QUOTE_CLOSE = "\u201d\u201f\u201e\""
+_QUOTED_TITLE = re.compile(
+    f"[{_QUOTE_OPEN}](?P<title>[^{_QUOTE_OPEN}{_QUOTE_CLOSE}]{{8,400}}?)[{_QUOTE_CLOSE}]",
+    re.DOTALL,
+)
+
+
 def _reference_title(text: str) -> str:
+    # A quoted title is tried first. The year-based fallback below assumes the
+    # APA layout "(2025). Title.", so on an IEEE entry it reads the year, takes
+    # the remainder, and splits it at the first "." — which lands inside the
+    # trailing DOI and returns "doi: 10" as the title. That both mislabels the
+    # reference in the report and makes every external match score zero.
+    quoted = _QUOTED_TITLE.search(text)
+    if quoted:
+        title = quoted.group("title").strip(" .,:;")
+        # Reject a quoted DOI or bare number, which is not a title.
+        if title and not re.fullmatch(
+            r"(?:doi\s*:\s*)?(?:https?://\S+)?10\.\d{4,9}/\S+", title, re.IGNORECASE
+        ):
+            return title
     year_match = re.search(r"\(\s*(?:19|20)\d{2}[a-z]?\s*\)\.?\s*", text)
     if year_match:
         remainder = text[year_match.end() :]
@@ -566,12 +602,17 @@ def _crossref_retry_delay(
     return min(delay, CROSSREF_MAX_RETRY_AFTER)
 
 
-def _crossref_get(
+def _api_get(
     url: str,
     *,
     headers: dict[str, str],
     params: dict[str, str | int] | None = None,
 ) -> requests.Response:
+    """Retry a public metadata API request within a bounded request rate.
+
+    Shared by both resolvers, because the polite-rate-limit and retry policy
+    should not differ between them.
+    """
     for attempt in range(CROSSREF_MAX_ATTEMPTS):
         response = requests.get(
             url, params=params, headers=headers, timeout=(3, 8)
@@ -581,7 +622,91 @@ def _crossref_get(
         if attempt + 1 == CROSSREF_MAX_ATTEMPTS:
             return response
         time.sleep(_crossref_retry_delay(response, attempt + 1))
-    raise RuntimeError("Crossref request retry loop ended unexpectedly.")
+    raise RuntimeError("Metadata request retry loop ended unexpectedly.")
+
+
+def _openalex_to_work(work: dict[str, object]) -> dict[str, object]:
+    """Normalize an OpenAlex record into the Crossref record shape.
+
+    The comparison code (`_work_metadata`, `_metadata_agreement`, `_conflicts`)
+    is written against Crossref's field names and is the most heavily tested
+    part of this module. Both resolvers therefore feed it the same shape rather
+    than duplicating every check for a second provider.
+    """
+    doi = work.get("doi")
+    if isinstance(doi, str) and doi.lower().startswith("https://doi.org/"):
+        doi = doi[len("https://doi.org/") :]
+    authors: list[dict[str, str]] = []
+    for authorship in work.get("authorships") or []:
+        if not isinstance(authorship, dict):
+            continue
+        person = authorship.get("author")
+        name = person.get("display_name") if isinstance(person, dict) else ""
+        if isinstance(name, str) and name.strip():
+            # Crossref separates family and given names. The final token is the
+            # closest safe approximation of a surname, and it is only ever
+            # compared against the entry's own first author.
+            parts = name.strip().split()
+            authors.append(
+                {
+                    "family": parts[-1] if parts else "",
+                    "given": " ".join(parts[:-1]),
+                }
+            )
+    year = work.get("publication_year")
+    return {
+        "DOI": doi if isinstance(doi, str) else "",
+        "title": [work.get("title") or ""],
+        "author": authors,
+        "published": {"date-parts": [[year]] if isinstance(year, int) else []},
+    }
+
+
+def _openalex_doi_work(doi: str) -> dict[str, object] | None:
+    """Fetch one work by DOI from OpenAlex.
+
+    Returns None when OpenAlex has no record, or when the lookup failed. The
+    caller cannot tell those apart and must not: a resolver outage must never
+    be reported as evidence that a reference is missing.
+    """
+    try:
+        response = _api_get(
+            f"{OPENALEX_URL}/doi:{quote(doi, safe='/')}",
+            headers=OPENALEX_HEADERS,
+        )
+        if response.status_code == 404:
+            return None
+        response.raise_for_status()
+        body = response.json()
+    except (requests.exceptions.RequestException, ValueError) as e:
+        log_failure("OpenAlex DOI lookup", e)
+        return None
+    if not isinstance(body, dict) or not body.get("id"):
+        return None
+    return _openalex_to_work(body)
+
+
+def _openalex_search_works(text: str) -> list[dict[str, object]]:
+    """Search OpenAlex by bibliographic metadata. Returns [] on any failure."""
+    try:
+        response = _api_get(
+            OPENALEX_URL,
+            params={"search": text[:1200], "per-page": 3},
+            headers=OPENALEX_HEADERS,
+        )
+        response.raise_for_status()
+        body = response.json()
+    except (requests.exceptions.RequestException, ValueError) as e:
+        log_failure("OpenAlex bibliographic search", e)
+        return []
+    results = body.get("results") if isinstance(body, dict) else None
+    if not isinstance(results, list):
+        return []
+    return [
+        _openalex_to_work(item)
+        for item in results
+        if isinstance(item, dict) and item.get("id")
+    ]
 
 
 def _record_check(
@@ -627,6 +752,121 @@ def _conflicts(reference: ReferenceAudit, work: dict[str, object]) -> list[str]:
     return conflicts
 
 
+def _openalex_recovery(
+    reference: ReferenceAudit, text: str, doi: str
+) -> ReferenceAudit | None:
+    """Try OpenAlex after Crossref failed, so one outage loses less coverage.
+
+    Returns None when OpenAlex could not settle the entry either, leaving the
+    caller to report the original failure honestly.
+    """
+    try:
+        if doi:
+            work = _openalex_doi_work(doi)
+            if work is not None:
+                return _record_doi_match(
+                    reference,
+                    text,
+                    work,
+                    doi,
+                    "OpenAlex",
+                    outage_note="Crossref was unreachable for this lookup.",
+                )
+            return None
+        found = _select_search_match(text, _openalex_search_works(text))
+        if len(found) == 1:
+            work, reasons, title, author = found[0]
+            reference["matched_title"] = title
+            reference["matched_author"] = author
+            reference["matched_year"] = _crossref_year(work)
+            return _record_check(
+                reference,
+                "confirmed",
+                "bibliographic_search · OpenAlex",
+                f"Crossref was unreachable, but an OpenAlex record matches the available title, first-author, and year metadata ({reasons}).",
+                matched_fields=reasons.split(", ") if reasons else [],
+                uncertainty=(
+                    "Matched by metadata similarity, not by DOI, and Crossref "
+                    "could not be consulted for this lookup."
+                ),
+            )
+    except Exception as e:  # a fallback must never mask the original failure
+        log_failure("OpenAlex recovery lookup", e)
+    return None
+
+
+def _select_search_match(
+    text: str, items: list[dict[str, object]]
+) -> list[tuple[dict[str, object], str, str, str]]:
+    """Candidates from a metadata search that agree with the entry.
+
+    More than one is returned on purpose: several agreeing records is a
+    different finding from none, and must be reported as ambiguous rather than
+    folded into "not found".
+    """
+    matches: list[tuple[dict[str, object], str, str, str]] = []
+    for item in items:
+        is_match, reasons, title, author = _metadata_agreement(text, item)
+        if is_match:
+            matches.append((item, reasons, title, author))
+    return matches
+
+
+def _record_doi_match(
+    reference: ReferenceAudit,
+    text: str,
+    work: dict[str, object],
+    doi: str,
+    resolver: str,
+    outage_note: str = "",
+) -> ReferenceAudit:
+    """Record a verdict for a work located by its exact DOI.
+
+    Shared by both resolvers so an OpenAlex hit is judged by exactly the same
+    title/author/year rules as a Crossref hit. `lookup_method` keeps the plain
+    "doi" value for Crossref and names the resolver only when it differs, so
+    existing consumers that match on the original values keep working.
+
+    `outage_note` discloses that the primary resolver was unreachable, because a
+    confirmation obtained without consulting it is weaker evidence and the
+    reader is entitled to know.
+    """
+    matches, reasons, title, author = _metadata_agreement(text, work)
+    reference["doi"] = doi
+    reference["matched_title"] = title
+    reference["matched_author"] = author
+    reference["matched_year"] = _crossref_year(work)
+    method = "doi" if resolver == "Crossref" else f"doi · {resolver}"
+    if matches:
+        message = f"Exact DOI found in {resolver}; {reasons}."
+        if outage_note:
+            message = f"{outage_note} {message}"
+        return _record_check(
+            reference,
+            "confirmed",
+            method,
+            message,
+            matched_fields=reasons.split(", ") if reasons else [],
+            uncertainty=outage_note,
+        )
+    return _record_check(
+        reference,
+        "ambiguous",
+        method,
+        f"The DOI resolves in {resolver}, but available title, first-author, or year metadata does not sufficiently match this entry. Review it manually.",
+        conflicting_fields=_conflicts(reference, work),
+        uncertainty=" ".join(
+            part
+            for part in (
+                "The DOI resolved, so the work exists; the disagreement is "
+                "between the supplied entry and the registered metadata.",
+                outage_note,
+            )
+            if part
+        ),
+    )
+
+
 def _verify_reference(reference: ReferenceAudit) -> ReferenceAudit:
     text = reference["text"]
     doi = _doi_from_text(text)
@@ -635,19 +875,27 @@ def _verify_reference(reference: ReferenceAudit) -> ReferenceAudit:
     }
     try:
         if doi:
-            response = _crossref_get(
+            response = _api_get(
                 f"{CROSSREF_URL}/{quote(doi, safe='')}",
                 headers=headers,
             )
             if response.status_code == 404:
+                # Crossref had nothing, so OpenAlex is asked before the entry is
+                # reported missing. This is what keeps a real preprint or
+                # non-DOI work from looking exactly like a fabricated reference.
+                fallback = _openalex_doi_work(doi)
+                if fallback is not None:
+                    return _record_doi_match(
+                        reference, text, fallback, doi, "OpenAlex"
+                    )
                 return _record_check(
                     reference,
                     "not_found_in_crossref",
                     "doi",
-                    "No Crossref record was found for this DOI. This does not prove the work does not exist.",
+                    "No record was found for this DOI in Crossref or OpenAlex. This does not prove the work does not exist.",
                     uncertainty=(
-                        "Crossref indexes most DOI-registered works but not "
-                        "every publisher or every older edition."
+                        "These registries index most DOI-registered works but not "
+                        "every publisher, every older edition, or every preprint."
                     ),
                 )
             response.raise_for_status()
@@ -666,33 +914,9 @@ def _verify_reference(reference: ReferenceAudit) -> ReferenceAudit:
                     "Crossref returned metadata that did not match the supplied DOI exactly."
                 )
                 return reference
-            matches, reasons, title, author = _metadata_agreement(text, work)
-            reference["doi"] = returned_doi
-            reference["matched_title"] = title
-            reference["matched_author"] = author
-            reference["matched_year"] = _crossref_year(work)
-            if matches:
-                return _record_check(
-                    reference,
-                    "confirmed",
-                    "doi",
-                    f"Exact DOI found in Crossref; {reasons}.",
-                    matched_fields=reasons.split(", ") if reasons else [],
-                )
-            conflicts = _conflicts(reference, work)
-            return _record_check(
-                reference,
-                "ambiguous",
-                "doi",
-                "The DOI resolves in Crossref, but available title, first-author, or year metadata does not sufficiently match this entry. Review it manually.",
-                conflicting_fields=conflicts,
-                uncertainty=(
-                    "The DOI resolved, so the work exists; the disagreement is "
-                    "between the supplied entry and the registered metadata."
-                ),
-            )
+            return _record_doi_match(reference, text, work, returned_doi, "Crossref")
 
-        response = _crossref_get(
+        response = _api_get(
             CROSSREF_URL,
             params={
                 "query.bibliographic": text[:1200],
@@ -706,14 +930,47 @@ def _verify_reference(reference: ReferenceAudit) -> ReferenceAudit:
         message = body.get("message") if isinstance(body, dict) else None
         items = message.get("items") if isinstance(message, dict) else None
         if not isinstance(items, list) or not items:
+            found = _select_search_match(text, _openalex_search_works(text))
+            if len(found) == 1:
+                work, reasons, title, author = found[0]
+                work_doi = work.get("DOI", "")
+                reference["matched_title"] = title
+                reference["matched_author"] = author
+                reference["matched_year"] = _crossref_year(work)
+                if isinstance(work_doi, str) and work_doi:
+                    reference["doi"] = work_doi
+                    reference["url"] = f"https://doi.org/{quote(work_doi, safe='/')}"
+                return _record_check(
+                    reference,
+                    "confirmed",
+                    "bibliographic_search · OpenAlex",
+                    f"An OpenAlex record matches the available title, first-author, and year metadata ({reasons}).",
+                    matched_fields=reasons.split(", ") if reasons else [],
+                    uncertainty=(
+                        "Matched by metadata similarity, not by DOI. Confirm it "
+                        "is the intended work before relying on it."
+                    ),
+                )
+            if len(found) > 1:
+                return _record_check(
+                    reference,
+                    "ambiguous",
+                    "bibliographic_search · OpenAlex",
+                    "Multiple plausible OpenAlex records were found; choose the intended work manually.",
+                    uncertainty=(
+                        "More than one record matched this entry, so no single "
+                        "work can be identified automatically."
+                    ),
+                )
             return _record_check(
                 reference,
                 "not_found_in_crossref",
                 "bibliographic_search",
-                "No matching Crossref record was found. This does not prove the work does not exist or is not registered elsewhere.",
+                "No matching record was found in Crossref or OpenAlex. This does not prove the work does not exist or is not registered elsewhere.",
                 uncertainty=(
                     "A bibliographic search matches on metadata only. A book "
-                    "chapter, report, or non-DOI source may not be indexed."
+                    "chapter, report, or non-DOI source may not be indexed by "
+                    "either registry."
                 ),
             )
         matches: list[tuple[dict[str, object], str, str, str]] = []
@@ -782,7 +1039,13 @@ def _verify_reference(reference: ReferenceAudit) -> ReferenceAudit:
             ),
         )
     except requests.exceptions.RequestException as e:
+        # Crossref being unreachable must not be the end of the audit. OpenAlex
+        # is independent, so a resolver outage degrades coverage instead of
+        # reporting every reference as unverifiable.
         log_failure("Crossref lookup", e)
+        recovered = _openalex_recovery(reference, text, doi)
+        if recovered is not None:
+            return recovered
         response = e.response
         if response is not None:
             logging.warning(
