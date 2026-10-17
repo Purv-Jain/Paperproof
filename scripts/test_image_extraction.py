@@ -2,13 +2,16 @@ import os
 import shutil
 import tempfile
 import unittest
+import unittest.mock
 from io import BytesIO
 
 from docx import Document
 from docx.shared import Inches
 from PIL import Image as PILImage
 import pymupdf
+import pytesseract
 
+from app import image_extraction
 from app.image_extraction import (
     CAPTION_PATTERN,
     MAX_IMAGES,
@@ -333,6 +336,143 @@ class ImageExtractionTests(unittest.TestCase):
         discard_media(VALID_PAPER_ID)
         self.assertTrue(os.path.exists(other[0]["local_path"]))
         discard_media(OTHER_PAPER_ID)
+
+
+class OcrAvailabilityTests(unittest.TestCase):
+    """Local OCR must be reported honestly, before a paper is opened.
+
+    These tests fail without `ocr_availability`: the probe does not exist, so
+    a machine without Tesseract has no way to learn that figure text is being
+    silently dropped.
+    """
+
+    def setUp(self):
+        self._probe = image_extraction._ocr_probe
+
+    def tearDown(self):
+        image_extraction._ocr_probe = self._probe
+
+    def test_missing_tesseract_is_reported_as_unavailable(self):
+        image_extraction._ocr_probe = None
+        with unittest.mock.patch.object(
+            image_extraction.pytesseract,
+            "get_tesseract_version",
+            side_effect=RuntimeError("not installed"),
+        ):
+            result = image_extraction.ocr_availability()
+        self.assertFalse(result["available"])
+        self.assertEqual(result["version"], "")
+        # The message must tell the reader what changes for them, not just that
+        # something is broken.
+        self.assertIn("captions", result["detail"])
+        self.assertIn("Tesseract", result["detail"])
+
+    def test_missing_english_pack_is_reported_as_unavailable(self):
+        image_extraction._ocr_probe = None
+        with unittest.mock.patch.object(
+            image_extraction.pytesseract,
+            "get_tesseract_version",
+            return_value="5.5.3",
+        ), unittest.mock.patch.object(
+            image_extraction.pytesseract,
+            "get_languages",
+            return_value=["osd"],
+        ):
+            result = image_extraction.ocr_availability()
+        self.assertFalse(result["available"])
+        self.assertIn("5.5.3", result["version"])
+        self.assertIn("English", result["detail"])
+
+    def test_working_tesseract_reports_available(self):
+        image_extraction._ocr_probe = None
+        with unittest.mock.patch.object(
+            image_extraction.pytesseract,
+            "get_tesseract_version",
+            return_value="5.5.3",
+        ), unittest.mock.patch.object(
+            image_extraction.pytesseract,
+            "get_languages",
+            return_value=["eng", "osd"],
+        ):
+            result = image_extraction.ocr_availability()
+        self.assertTrue(result["available"])
+        self.assertEqual(result["version"], "5.5.3")
+
+    def test_probe_runs_once_per_process(self):
+        image_extraction._ocr_probe = None
+        with unittest.mock.patch.object(
+            image_extraction.pytesseract,
+            "get_tesseract_version",
+            return_value="5.5.3",
+        ) as version:
+            first = image_extraction.ocr_availability()
+            second = image_extraction.ocr_availability()
+        # A computed var re-reads this on every render, so an uncached probe
+        # would spawn a Tesseract subprocess per frame.
+        self.assertEqual(version.call_count, 1)
+        self.assertEqual(first, second)
+
+    def test_probe_honours_force(self):
+        image_extraction._ocr_probe = None
+        with unittest.mock.patch.object(
+            image_extraction.pytesseract,
+            "get_tesseract_version",
+            return_value="5.5.3",
+        ) as version:
+            image_extraction.ocr_availability()
+            image_extraction.ocr_availability(force=True)
+        self.assertEqual(version.call_count, 2)
+
+    def test_probe_failure_is_logged_by_type_not_by_message(self):
+        image_extraction._ocr_probe = None
+        secret = "C:\\Users\\someone\\AppData secret-token"
+        with unittest.mock.patch.object(
+            image_extraction.pytesseract,
+            "get_tesseract_version",
+            side_effect=RuntimeError(secret),
+        ), self.assertLogs(level="WARNING") as logs:
+            image_extraction.ocr_availability()
+        logged = "\n".join(logs.output)
+        self.assertNotIn("secret-token", logged)
+        self.assertIn("RuntimeError", logged)
+
+
+class RealOcrProbeTests(unittest.TestCase):
+    def setUp(self):
+        self._probe = image_extraction._ocr_probe
+
+    def tearDown(self):
+        image_extraction._ocr_probe = self._probe
+
+    def test_probe_agrees_with_a_real_tesseract_run(self):
+        """The reported verdict must match what OCR actually does here."""
+        image_extraction._ocr_probe = None
+        result = image_extraction.ocr_availability()
+        if not result["available"]:
+            self.skipTest("Tesseract OCR is not available on this machine")
+        text = render_ocr_probe_image()
+        self.assertTrue(text.strip(), "OCR reported available but read nothing")
+
+
+def render_ocr_probe_image() -> str:
+    """Draw a known word and OCR it, the same way figures are read."""
+    from PIL import ImageDraw
+
+    with tempfile.TemporaryDirectory(prefix="paperproof-ocr-") as folder:
+        path = os.path.join(folder, "probe.png")
+        image = PILImage.new("RGB", (900, 200), "white")
+        ImageDraw.Draw(image).text(
+            (30, 70), "REFERENCE", fill="black", font_size=60
+        )
+        image.save(path)
+        try:
+            return pytesseract.image_to_string(
+                PILImage.open(path), lang="eng", config="--psm 6"
+            )
+        except Exception as e:
+            raise AssertionError(
+                f"OCR reported available but the call failed: {type(e).__name__}"
+            ) from e
 
 
 if __name__ == "__main__":

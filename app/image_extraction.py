@@ -307,6 +307,81 @@ def _colour_count(png_bytes: bytes) -> int:
         return 0
 
 
+class OcrAvailability(TypedDict):
+    """Whether local Tesseract OCR can actually run on this machine."""
+
+    available: bool
+    version: str
+    detail: str
+
+
+# Probed once per process. `ocr_availability` is read from a computed var, which
+# Reflex re-evaluates on every render, so an uncached probe would spawn a
+# Tesseract subprocess per frame.
+_ocr_probe: OcrAvailability | None = None
+
+
+def ocr_availability(force: bool = False) -> OcrAvailability:
+    """Report whether figure OCR will work, before any paper is opened.
+
+    OCR is the one extraction step that fails quietly. Without Tesseract the
+    paper still opens, captions and surrounding text still work, and the only
+    evidence is a log line nobody reads, so figure text simply disappears and
+    the reader has no way to know why a figure looks empty. Probing up front
+    lets the upload panel say so before a document is ever parsed.
+
+    The English language pack is checked as well as the binary: Tesseract
+    installs successfully without `eng` on some systems, and every OCR call
+    here asks for `lang="eng"`, so a missing pack is a silent loss in exactly
+    the same way.
+    """
+    global _ocr_probe
+    if _ocr_probe is not None and not force:
+        return _ocr_probe
+    result: OcrAvailability
+    try:
+        version = str(pytesseract.get_tesseract_version())
+    except Exception as e:
+        # Logged by operation, not by message: the failure can include a path
+        # from the host, which must not reach a handler.
+        logging.warning("Tesseract OCR probe failed: %s", type(e).__name__)
+        result = OcrAvailability(
+            available=False,
+            version="",
+            detail=(
+                "Local OCR is unavailable, so figures will be read from their "
+                "captions and nearby paper text only. Install Tesseract OCR "
+                "with the English language pack to read text inside figures."
+            ),
+        )
+    else:
+        try:
+            languages = pytesseract.get_languages(config="")
+        except Exception as e:
+            logging.warning(
+                "Tesseract language probe failed: %s", type(e).__name__
+            )
+            languages = []
+        if "eng" not in languages:
+            result = OcrAvailability(
+                available=False,
+                version=version,
+                detail=(
+                    f"Tesseract {version} is installed but its English "
+                    "language pack is missing, so figures will be read from "
+                    "their captions and nearby paper text only."
+                ),
+            )
+        else:
+            result = OcrAvailability(
+                available=True,
+                version=version,
+                detail=f"Local OCR is available (Tesseract {version}).",
+            )
+    _ocr_probe = result
+    return result
+
+
 def _ocr_image(path: Path) -> str:
     try:
         with Image.open(path) as image:
@@ -805,6 +880,7 @@ def _docx_blob(
 __all__ = [
     "CAPTION_PATTERN",
     "ExtractionWarning",
+    "OcrAvailability",
     "PaperImage",
     "ResearchClassification",
     "UPLOAD_URL_PREFIX",

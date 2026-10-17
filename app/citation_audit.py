@@ -79,6 +79,7 @@ class AuditSummary(TypedDict):
     confirmed: int
     needing_review: int
     extraction_warnings: int
+    references_failed: int
 
 
 class AuditNote(TypedDict):
@@ -1424,6 +1425,11 @@ def _build_counts(
         for reference in references
         if reference["status"] not in {"pending", "not_checked_limit"}
     )
+    failed = sum(
+        1
+        for reference in references
+        if reference["status"] == "lookup_error"
+    )
     return AuditSummary(
         citations_found=citations,
         references_parsed=len(references),
@@ -1444,6 +1450,7 @@ def _build_counts(
             }
         ),
         extraction_warnings=len(paper.get("extraction_warnings", []) or []),
+        references_failed=failed,
     )
 
 
@@ -1475,6 +1482,9 @@ def _build_explanation(
                 "candidates, and year consistency were checked for every entry. "
                 f"{counts['references_checked']} entries were looked up "
                 "externally."
+                f" {counts['references_failed']} lookup"
+                f"{'s' if counts['references_failed'] != 1 else ''} "
+                "failed."
             ),
         ),
         AuditNote(

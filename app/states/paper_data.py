@@ -476,9 +476,18 @@ def _partition_lines(
             if re.fullmatch(r"(?:page\s+)?\d+", text, re.IGNORECASE):
                 continue
             if _reference_start(text):
-                flush_entry()
-                flush_body()
-                entry = [line]
+                # Only start a new reference if the line is credible;
+                # otherwise merge the line into the previous entry (orphan
+                # continuation lines from wrapped references).
+                if _credible_reference(text):
+                    flush_entry()
+                    flush_body()
+                    entry = [line]
+                else:
+                    if entry:
+                        entry.append(line)
+                    else:
+                        entry = [line]
             elif entry:
                 if re.match(
                     r"^(?:This|These|We|Our|The study|In this|Note:)\b", text

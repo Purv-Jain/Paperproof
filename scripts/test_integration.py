@@ -24,8 +24,13 @@ import pymupdf
 from docx import Document
 from PIL import Image
 
-from app.citation_audit import run_citation_audit
-from app.components.workspace import image_src
+from app.citation_audit import ReferenceAudit, run_citation_audit
+from app.components.workspace import (
+    entry_number_badge,
+    image_src,
+    reference_row,
+    verification_row,
+)
 from app.image_extraction import UPLOAD_URL_PREFIX, discard_media, media_dir
 from app.model_config import search_provider
 from app.paper_classification import classify_research_paper
@@ -45,8 +50,10 @@ from app.states.workspace_state import (
     build_answer_context,
     paper_extraction_warnings,
     paper_images,
+    reference_number,
     route_question,
     section_count,
+    WorkspaceState,
 )
 
 UNSUPPORTED = (
@@ -798,6 +805,82 @@ class ClassificationFlowTests(FlowTestCase):
             paper["passages"], paper["references"]
         )["outcome"]
         self.assertIn(outcome, {"accepted", "accepted_with_warnings"})
+
+
+class ReferenceNumberingTests(unittest.TestCase):
+    """An answer's `[n]` must be findable on the row it points at.
+
+    Evidence cards tell the reader that a cited entry is "the same row shown in
+    the References tab". If the row does not carry the number, that instruction
+    cannot be followed and the reader has to count a long list by hand.
+    """
+
+    def paper_with_references(self, count: int = 4) -> Paper:
+        return Paper(
+            id="upload-" + "c" * 32,
+            title="Numbered",
+            filename="numbered.docx",
+            pages=1,
+            passages=[Passage(id="p1", section="Body", page=1, text="Body text.")],
+            references=[
+                Reference(
+                    id=f"r{index}",
+                    text=f"Author{index}, A. (2020). Title {index}. Press.",
+                    location="References",
+                )
+                for index in range(1, count + 1)
+            ],
+            images=[],
+            extraction_warnings=[],
+        )
+
+    def test_numbers_match_the_order_shown_to_the_reader(self) -> None:
+        paper = self.paper_with_references()
+        state = WorkspaceState(_reflex_internal_init=True)
+        state.papers = [paper]
+        state.selected_id = paper["id"]
+        numbers = state.reference_numbers
+        self.assertEqual(
+            numbers, {"r1": "1", "r2": "2", "r3": "3", "r4": "4"}
+        )
+        # The badge and the answer must never disagree about an entry.
+        for reference in paper["references"]:
+            with self.subTest(reference=reference["id"]):
+                self.assertEqual(
+                    numbers[reference["id"]],
+                    reference_number(paper, reference["id"]),
+                )
+
+    def test_a_paper_without_references_maps_to_nothing(self) -> None:
+        paper = self.paper_with_references()
+        paper["references"] = []
+        state = WorkspaceState(_reflex_internal_init=True)
+        state.papers = [paper]
+        state.selected_id = paper["id"]
+        self.assertEqual(state.reference_numbers, {})
+
+    def test_both_reference_row_kinds_carry_the_number(self) -> None:
+        paper = self.paper_with_references()
+        supplied = paper["references"][1]
+        audited = ReferenceAudit(
+            id=supplied["id"],
+            text=supplied["text"],
+            location=supplied["location"],
+            status="confirmed",
+            message="A Crossref record matches the available metadata.",
+            lookup_method="doi",
+            checked_at="2026-01-01T00:00:00Z",
+            matched_title="Title 2",
+            matched_author="Author2",
+            matched_year="2020",
+            url="https://doi.org/10.0000/2",
+            matched_fields=["title", "year"],
+            conflicting_fields=[],
+            uncertainty="",
+        )
+        rendered_ref = json.dumps(reference_row(paper["references"][1]).render())
+        badge = json.dumps(entry_number_badge("r2").render())
+        self.assertIn(badge, rendered_ref)
 
 
 if __name__ == "__main__":

@@ -18,9 +18,11 @@ from app.citation_audit import (
 )
 from app.image_extraction import (
     ExtractionWarning,
+    OcrAvailability,
     PaperImage,
     ResearchClassification,
     discard_media,
+    ocr_availability,
     prune_media,
     session_media_bytes,
 )
@@ -1552,6 +1554,42 @@ class WorkspaceState(rx.State):
     @rx.var
     def is_auditing_selected(self) -> bool:
         return self.audit_running and self.audit_target_id == self.selected_id
+
+    @rx.var
+    def ocr_status(self) -> OcrAvailability:
+        """Whether local figure OCR works on this machine.
+
+        Surfaced in the upload panel so a run without Tesseract is disclosed
+        before a paper is parsed, rather than discovered later as figures that
+        look inexplicably empty.
+        """
+        return ocr_availability()
+
+    @rx.var
+    def reference_numbers(self) -> dict[str, str]:
+        """Map every bibliography entry id to the `[n]` an answer cites.
+
+        An evidence card points the reader at "the same row shown in the
+        References tab", so the row has to carry the number itself. Keyed by id
+        rather than by position because the References tab renders a different
+        collection once an audit has replaced the list with verification rows.
+        """
+        return {
+            reference["id"]: str(number)
+            for number, reference in enumerate(
+                self.selected_paper.get("references", []) or [], start=1
+            )
+        }
+
+    @rx.var
+    def passage_chunks(self) -> list[RetrievedPassage]:
+        """Memoized chunks per paper — re-chunk/re-tokenize only when the paper changes.
+
+        `_chunk_passages` and `_retrieve_passages` re-chunk and re-tokenize the
+        whole document on every question. Memoizing per paper is a pure win with
+        no behaviour change.
+        """
+        return _chunk_passages(self.selected_paper.get("passages", []) or [])
 
     @rx.var
     def selected_paper(self) -> Paper:

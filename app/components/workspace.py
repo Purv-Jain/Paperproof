@@ -9,7 +9,7 @@ from app.image_extraction import (
 from app.model_config import CapabilityCheck
 from app.search_provenance import SearchSource
 from app.states.paper_data import AnswerEvidence, Paper, Passage, Reference
-from app.states.workspace_state import WorkspaceState
+from app.states.workspace_state import WorkspaceState, reference_number
 
 
 def header() -> rx.Component:
@@ -351,6 +351,16 @@ def upload_panel() -> rx.Component:
                 class_name="mt-3 rounded-lg bg-[#eef4ea] p-3 text-xs leading-relaxed text-[#215b56]",
             ),
         ),
+        rx.cond(
+            ~WorkspaceState.ocr_status["available"],
+            rx.el.div(
+                rx.el.p(
+                    WorkspaceState.ocr_status["detail"],
+                    class_name="text-[11px] leading-relaxed text-[#8a5f2b]",
+                ),
+                class_name="mt-3 rounded-lg border border-[#e8d9b8] bg-[#fdf6e7] p-3",
+            ),
+        ),
         rx.el.p(
             rx.icon("lock-keyhole", class_name="mt-0.5 h-3 w-3 shrink-0"),
             "Your file stays in this session only. Figures are extracted and "
@@ -358,7 +368,7 @@ def upload_panel() -> rx.Component:
             "model. Citation-audit bibliography entries are sent to Crossref; "
             "claim excerpts are not sent to OpenRouter by this audit. Asking a "
             "question sends relevant text excerpts to OpenRouter. Scanned PDFs "
-            "and figures use English OCR.",
+            "and figures use English OCR when this machine provides it.",
             class_name="mt-3 flex gap-2 text-[11px] leading-relaxed text-[#7b847b]",
         ),
         pending_upload_panel(),
@@ -425,9 +435,30 @@ def passage_choice(passage: Passage) -> rx.Component:
     )
 
 
+def entry_number_badge(reference_id: str) -> rx.Component:
+    """The `[n]` an answer cites, shown on the bibliography row itself.
+
+    Answers cite entries by their position in this list, and an evidence card
+    tells the reader it is "the same row shown in the References tab". Without
+    the number on the row that instruction cannot be followed: the reader is
+    left counting rows by hand, and on a 28-entry list that guess is easy to
+    get wrong. The number comes from the entry's real position, so it cannot
+    drift from the order on screen.
+    """
+    number = WorkspaceState.reference_numbers[reference_id]
+    return rx.cond(
+        number.to_string() != "",
+        rx.el.span(
+            "[" + number + "]",
+            class_name="mt-0.5 w-fit shrink-0 rounded-md bg-[#eef1e6] px-1.5 py-0.5 font-mono text-[10px] font-semibold text-[#5f7268]",
+        ),
+    )
+
+
 def reference_row(reference: Reference) -> rx.Component:
     return rx.el.li(
         rx.icon("bookmark", class_name="mt-1 h-4 w-4 shrink-0 text-[#80917e]"),
+        entry_number_badge(reference["id"]),
         rx.el.div(
             rx.el.p(
                 reference["text"], class_name="text-sm leading-7 text-[#43524d]"
@@ -766,7 +797,9 @@ def paper_reader() -> rx.Component:
                         passage_choice,
                     ),
                     aria_label="Paper passages",
-                    class_name="flex max-h-80 w-full shrink-0 flex-col gap-1 overflow-y-auto border-b border-[#eceede] bg-[#fafbf5] p-3 md:max-h-[430px] md:w-44 md:border-r md:border-b-0 md:py-5",
+                    role="region",
+                    tab_index=0,
+                    class_name="flex max-h-80 w-full shrink-0 flex-col gap-1 overflow-y-auto border-b border-[#eceede] bg-[#fafbf5] p-3 focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[#215b56] md:max-h-[430px] md:w-44 md:border-r md:border-b-0 md:py-5",
                 ),
                 rx.el.article(
                     rx.el.div(
@@ -838,9 +871,23 @@ def paper_reader() -> rx.Component:
                             # A paper can carry hundreds of entries. Scoping the
                             # scroll to this list keeps the tabs and the reader
                             # reachable instead of pushing them off-screen.
+                            # `tab_index` and `role` are what make the scroll
+                            # reachable: an overflow container is not in the tab
+                            # order on its own, so without them the list is
+                            # mouse-only.
+                            role="region",
+                            tab_index=0,
+                            aria_label=rx.cond(
+                                WorkspaceState.selected_audit["references"].length()
+                                > 0,
+                                "Parsed references and verification status",
+                                "References as supplied",
+                            ),
                             class_name="mt-2 max-h-[420px] overflow-y-auto "
                             "overscroll-contain rounded-xl border border-[#eeede0] "
-                            "bg-[#fffefa] pr-1 md:max-h-[520px]",
+                            "bg-[#fffefa] pr-1 focus-visible:outline-2 "
+                            "focus-visible:outline-offset-2 "
+                            "focus-visible:outline-[#215b56] md:max-h-[520px]",
                         ),
                     ),
                     rx.el.div(
@@ -931,6 +978,7 @@ def verification_row(reference: ReferenceAudit) -> rx.Component:
     return rx.el.li(
         rx.el.div(
             rx.el.div(
+                entry_number_badge(reference["id"]),
                 rx.el.span(
                     rx.match(
                         reference["status"],
