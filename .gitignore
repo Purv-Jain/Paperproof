@@ -22,3 +22,6 @@ assets/xy/
 # Deployment artifacts from 'reflex export'
 frontend.zip
 backend.zip
+
+# Original full-resolution brand artwork; processed copies live in assets/brand/
+uploaded_files/

@@ -16,19 +16,23 @@ def header() -> rx.Component:
     return rx.el.header(
         rx.el.div(
             rx.el.a(
-                rx.el.span(
-                    rx.icon(
-                        "book-open-check", class_name="h-6 w-6 text-[#215b56]"
-                    ),
-                    class_name="flex h-10 w-10 items-center justify-center rounded-xl bg-[#e8efea]",
+                rx.el.img(
+                    src="/brand/icon-book-check.webp",
+                    alt="",
+                    width=40,
+                    height=38,
+                    class_name="h-9 w-auto shrink-0 sm:h-10",
                 ),
-                rx.el.span(
-                    "paperproof",
-                    class_name="font-['Lora'] text-2xl font-semibold tracking-tight text-[#202e3b]",
+                rx.el.img(
+                    src="/brand/logo-text.webp",
+                    alt="PaperProof",
+                    width=148,
+                    height=31,
+                    class_name="h-[24px] w-auto shrink-0 sm:h-[30px]",
                 ),
                 href="/",
-                aria_label="Paperproof home",
-                class_name="flex items-center gap-3",
+                aria_label="PaperProof home",
+                class_name="flex items-center gap-2.5",
             ),
             rx.el.span(
                 rx.el.span(class_name="h-1.5 w-1.5 rounded-full bg-[#bc7567]"),
@@ -1919,15 +1923,25 @@ def workspace() -> rx.Component:
             ),
             citation_audit_panel(),
             rx.el.footer(
-                rx.el.span(
-                    "Made for curious minds, not just experts.",
-                    class_name="font-['Lora'] text-xs italic text-[#8b9180]",
+                rx.el.div(
+                    rx.el.img(
+                        src="/brand/icon-book-check.webp",
+                        alt="",
+                        width=22,
+                        height=21,
+                        class_name="h-[21px] w-auto shrink-0 opacity-75",
+                    ),
+                    rx.el.span(
+                        "Made for curious minds, not just experts.",
+                        class_name="font-['Lora'] text-xs italic text-[#8b9180]",
+                    ),
+                    class_name="flex items-center gap-2.5",
                 ),
                 rx.el.span(
                     "Session-only workspace · No account needed",
                     class_name="text-[10px] text-[#929887]",
                 ),
-                class_name="mt-8 flex flex-wrap justify-between gap-3 border-t border-[#e3e5d9] py-5",
+                class_name="mt-8 flex flex-wrap items-center justify-between gap-3 border-t border-[#e3e5d9] py-5",
             ),
             class_name="mx-auto w-full max-w-[1440px] px-5 pb-4 md:px-10",
         ),
