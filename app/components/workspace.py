@@ -486,15 +486,19 @@ def image_src(paper_id, filename) -> str:
 def figure_card(paper_id, image: PaperImage) -> rx.Component:
     source = image_src(paper_id, image["filename"])
     return rx.el.li(
-        rx.el.img(
-            src=source,
-            alt=rx.cond(
-                image["caption"] != "",
-                image["caption"],
-                f"Figure {image['order'] + 1} from this paper",
+        rx.el.div(
+            rx.el.img(
+                src=source,
+                alt=rx.cond(
+                    image["caption"] != "",
+                    image["caption"],
+                    f"Figure {image['order'] + 1} from this paper",
+                ),
+                loading="lazy",
+                class_name="w-full rounded-lg border border-[#e4e7db] bg-white object-contain",
+                style="max-height: 400px; object-fit: contain;",
             ),
-            loading="lazy",
-            class_name="w-full rounded-lg border border-[#e4e7db] bg-white object-contain",
+            class_name="flex flex-col h-64 overflow-y-auto",
         ),
         rx.el.p(
             rx.cond(
