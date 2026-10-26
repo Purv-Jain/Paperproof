@@ -496,7 +496,7 @@ def figure_card(paper_id, image: PaperImage) -> rx.Component:
                 ),
                 loading="lazy",
                 class_name="w-full rounded-lg border border-[#e4e7db] bg-white object-contain",
-                style="max-height: 400px; object-fit: contain;",
+                style={"max_height": "400px", "object_fit": "contain"},
             ),
             class_name="flex flex-col h-64 overflow-y-auto",
         ),
