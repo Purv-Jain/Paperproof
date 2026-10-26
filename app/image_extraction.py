@@ -27,6 +27,43 @@ from docx.document import Document as DocxDocument
 from docx.oxml.ns import qn
 from PIL import Image
 
+
+def _use_fallback_tesseract() -> None:
+    """Point pytesseract at an install it cannot find through PATH.
+
+    On Windows the Tesseract installer is not always on PATH (an edited user
+    environment, a terminal opened before the change, a launcher that caches
+    the old environment), and pytesseract only ever looks up the bare name
+    "tesseract" there. When PATH lookup fails, fall back to the installer's
+    standard locations; when one of those exists, every OCR call in the app
+    resolves through it. On Linux — including the Render runtime image, which
+    installs the tesseract-ocr package — shutil.which finds the binary and
+    this returns without touching anything.
+    """
+    if shutil.which("tesseract") is not None:
+        return
+    candidates = [
+        Path(os.environ.get("ProgramFiles", r"C:\Program Files"))
+        / "Tesseract-OCR"
+        / "tesseract.exe"
+    ]
+    local_appdata = os.environ.get("LOCALAPPDATA")
+    if local_appdata:
+        candidates.append(
+            Path(local_appdata) / "Programs" / "Tesseract-OCR" / "tesseract.exe"
+        )
+    for candidate in candidates:
+        if candidate.is_file():
+            pytesseract.pytesseract.tesseract_cmd = str(candidate)
+            logging.info("Tesseract resolved from install location: %s", candidate)
+            return
+
+
+# Resolve once at import, before any probe or OCR call. Both OCR call sites
+# (this module and states/paper_data.py) share the same pytesseract module,
+# so this covers both.
+_use_fallback_tesseract()
+
 # Extraction limits. These bound work per upload so a hostile or unusual
 # document cannot stall the workspace.
 MAX_IMAGES = 200

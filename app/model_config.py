@@ -32,19 +32,24 @@ ENV_VARS: dict[str, str] = {
 }
 
 # Default text model. Chosen by probing OpenRouter's zero-cost tier against a
-# real key: this one is available, is a capable 120B mixture-of-experts, has a
-# 256k context window, and advertises `structured_outputs`, so Paperproof can
-# enforce the answer contract with a real JSON schema instead of relying on
-# prompt wording. Override per deployment with the variables above.
-DEFAULT_MODEL = "nvidia/nemotron-3-super-120b-a12b:free"
+# real key (2026-10-26): this one completed a live request, has a 512k context
+# window, and advertises `structured_outputs`, so Paperproof can enforce the
+# answer contract with a real JSON schema instead of relying on prompt wording.
+# The previous default (nvidia/nemotron-3-super-120b-a12b:free) still appears
+# in OpenRouter's model list but its NVIDIA-hosted function now answers 404,
+# which the list-based rollover cannot detect.
+# Override per deployment with the variables above.
+DEFAULT_MODEL = "dots-studio/dots-3-note-preview:free"
 
-# Known-good zero-cost fallbacks, also verified against a real key. They exist
-# because free models are withdrawn or restricted without notice. Paperproof
-# does not switch silently: it names the model it used.
+# Known-good zero-cost fallbacks. They exist because free models are withdrawn
+# or restricted without notice. Paperproof does not switch silently: it names
+# the model it used. The nemotron-3-super slug is still listed but its NVIDIA
+# upstream answers 404 as of 2026-10-26, so it stays last in case that is
+# transient and it is revived.
 FALLBACK_MODELS = (
     "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
     "poolside/laguna-s-2.1:free",
-    "dots-studio/dots-3-note-preview:free",
+    "nvidia/nemotron-3-super-120b-a12b:free",
 )
 
 # The auto-router. Support cannot be verified in advance because it picks a
