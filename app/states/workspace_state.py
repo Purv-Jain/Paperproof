@@ -1075,6 +1075,13 @@ def _call_openrouter(
                 "schema": ANSWER_SCHEMA,
             },
         }
+    # Reasoning models can spend the entire completion budget thinking before
+    # any answer text is emitted, which returns content=None or a truncated
+    # answer and surfaces to the reader as "could not be verified". This task
+    # is a bounded 2-4 sentence synthesis whose contract is enforced below, so
+    # ask for the answer directly when the model advertises a reasoning switch.
+    if supports_parameter(model, "reasoning"):
+        payload["reasoning"] = {"enabled": False}
     for attempt in range(2):
         try:
             response = requests.post(
@@ -1270,6 +1277,10 @@ def _call_openrouter_search(
         "max_tokens": 700,
         "temperature": 0.3,
     }
+    # Same reasoning-budget guard as the answer path: search summaries are
+    # short and bounded, so a hidden reasoning pass can starve the response.
+    if supports_parameter(model, "reasoning"):
+        payload["reasoning"] = {"enabled": False}
     try:
         response = requests.post(
             "https://openrouter.ai/api/v1/chat/completions",
